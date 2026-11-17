@@ -75,6 +75,20 @@ func Address(s string) (string, error) {
 	return a, nil
 }
 
+// HostedName validates the address of a mailbox or alias this server hosts. "+" is
+// valid in an address but is the plus-addressing delimiter here, so a hosted name
+// containing one could never be delivered to as written.
+func HostedName(s string) (string, error) {
+	a, err := Address(s)
+	if err != nil {
+		return "", err
+	}
+	if local, _ := Split(a); strings.Contains(local, "+") {
+		return "", fmt.Errorf(`%s: "+" is reserved for plus-addressing and cannot be part of a mailbox or alias name`, a)
+	}
+	return a, nil
+}
+
 // Split returns the local part and domain of a validated address.
 func Split(address string) (local, domain string) {
 	local, domain, _ = strings.Cut(address, "@")
@@ -92,11 +106,17 @@ func Consistency(s store.Snapshot) error {
 		if err := inHostedDomain(m.Address, hosted); err != nil {
 			return err
 		}
+		if _, err := HostedName(m.Address); err != nil {
+			return err
+		}
 		mailboxes[m.Address] = m
 	}
 	aliases := map[string][]string{}
 	for _, a := range s.Aliases {
 		if err := inHostedDomain(a.Address, hosted); err != nil {
+			return err
+		}
+		if _, err := HostedName(a.Address); err != nil {
 			return err
 		}
 		if _, dup := mailboxes[a.Address]; dup {
@@ -148,9 +168,12 @@ func inHostedDomain(address string, hosted map[string]bool) error {
 }
 
 func resolves(alias, target string, hosted map[string]bool, mailboxes map[string]store.Mailbox, aliases map[string][]string) error {
-	_, domain := Split(target)
+	local, domain := Split(target)
 	if !hosted[domain] {
 		return nil
+	}
+	if base, _, plus := strings.Cut(local, "+"); plus {
+		return fmt.Errorf("alias %s targets %s, but plus-addressing is not part of a hosted address; target the base address %s@%s instead", alias, target, base, domain)
 	}
 	if m, ok := mailboxes[target]; ok {
 		if m.State == store.Disabled {

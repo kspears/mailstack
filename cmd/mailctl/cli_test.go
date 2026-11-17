@@ -106,3 +106,40 @@ func TestActorFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestLostStoreIsNotSilentlyReplaced(t *testing.T) {
+	state, mail := t.TempDir(), t.TempDir()
+	vars := map[string]string{"MAILCTL_STATE": state, "MAILCTL_MAIL_ROOT": mail, "MAILCTL_WATCHER": "off", "USER": "alex"}
+	do := func(args ...string) (int, string, string) {
+		var out, errOut bytes.Buffer
+		code := run(args, func(k string) string { return vars[k] }, strings.NewReader(""), &out, &errOut)
+		return code, out.String(), errOut.String()
+	}
+	if code, _, e := do("domain", "add", "example.test"); code != 0 {
+		t.Fatal(e)
+	}
+	storePath := filepath.Join(state, "store.db")
+	if err := os.Remove(storePath); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "error: account store " + storePath + " is missing but generated files exist; restore it from backup\n"
+	for _, args := range [][]string{{"mailbox", "list"}, {"log"}, {"domain", "add", "example.org"}} {
+		if code, _, e := do(args...); code != 1 || e != want {
+			t.Errorf("%v: code %d stderr %q", args, code, e)
+		}
+	}
+	if _, err := os.Stat(storePath); err == nil {
+		t.Fatal("a refused command created store.db")
+	}
+
+	if code, _, e := do("apply"); code != 1 || !strings.Contains(e, "the account store is empty but the files in use are not") {
+		t.Errorf("apply: code %d stderr %q", code, e)
+	}
+	if code, out, e := do("apply", "--publish-empty"); code != 0 || out != "ok: applied current account set\n" {
+		t.Errorf("apply --publish-empty: code %d stdout %q stderr %q", code, out, e)
+	}
+	if code, _, _ := do("apply", "--nonsense"); code != 2 {
+		t.Errorf("bad apply flag: code %d", code)
+	}
+}

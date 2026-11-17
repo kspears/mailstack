@@ -2,6 +2,7 @@ package mailcow
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func good() Data {
 			{Address: "team@example.test", Goto: "info@example.test,bob@example.test,away@example.net", Active: true},
 		},
 		SenderACLs:    []SenderACL{{LoggedInAs: "alice@example.test", SendAs: "sales@example.test"}},
-		Relayhosts:    []Relayhost{{ID: "1", Hostname: relay}},
+		Relayhosts:    []Relayhost{{ID: "1", Hostname: relay, Active: true}},
 		Counts:        map[string]int{},
 		DKIMSelectors: map[string]string{"example.test": "dkim", "example.org": "s1"},
 		DKIMKeys: map[string]string{
@@ -107,8 +108,12 @@ func TestPlanStopItems(t *testing.T) {
 		{"bcc-maps", func(d *Data) { d.Counts["bcc-maps"] = 2 }},
 		{"recipient-maps", func(d *Data) { d.Counts["recipient-maps"] = 2 }},
 		{"transport-maps", func(d *Data) { d.Counts["transport-maps"] = 2 }},
-		{"relayhosts-differing", func(d *Data) {
-			d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25"})
+		{"relayhosts-unused", func(d *Data) {
+			d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25", Active: true})
+		}},
+		{"relayhosts-in-use", func(d *Data) {
+			d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25", Active: true})
+			d.Domains[0].RelayhostID = "2"
 		}},
 		{"temporary-aliases", func(d *Data) { d.Counts["temporary-aliases"] = 2 }},
 		{"sync-jobs", func(d *Data) { d.Counts["sync-jobs"] = 2 }},
@@ -126,6 +131,9 @@ func TestPlanStopItems(t *testing.T) {
 		{"external-send-as", func(d *Data) {
 			d.SenderACLs = append(d.SenderACLs, SenderACL{LoggedInAs: "alice@example.test", SendAs: "x@example.net", External: true})
 		}},
+		{"sieve-scripts", func(d *Data) { d.Counts["sieve-scripts"] = 2 }},
+		{"shared-folder-acls", func(d *Data) { d.Counts["shared-folder-acls"] = 2 }},
+		{"global-rspamd-maps", func(d *Data) { d.Counts["global-rspamd-maps"] = 2 }},
 	}
 	covered := map[string]bool{}
 	for _, tc := range tests {
@@ -265,24 +273,72 @@ func TestPlanRelayhosts(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	t.Run("assigned to a differing row", func(t *testing.T) {
+	t.Run("differing row assigned to a domain is in use and cannot be acknowledged", func(t *testing.T) {
 		d := good()
-		d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25"})
+		d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25", Active: true})
 		d.Domains[0].RelayhostID = "2"
-		_, rep, err := Plan(d, Options{SkipMailboxes: []string{"carol@example.org"}, RelayHost: relay, Acknowledge: []string{"relayhosts-differing"}})
+		_, rep, err := Plan(d, opts())
+		if err == nil || err.Error() != "relayhosts-in-use has 1 rows and no destination" {
+			t.Fatalf("err = %v", err)
+		}
+		if got := findingRows(rep, "relayhosts-unused"); got != 0 {
+			t.Errorf("an assigned row also counted as unused: %d", got)
+		}
+		o := opts()
+		o.Acknowledge = []string{"relayhosts-in-use"}
+		if _, _, err := Plan(d, o); err == nil || !strings.Contains(err.Error(), "cannot be acknowledged") {
+			t.Errorf("acknowledging in-use: %v", err)
+		}
+	})
+	t.Run("differing row assigned to a carried mailbox is in use", func(t *testing.T) {
+		d := good()
+		d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25", Active: true})
+		d.Mailboxes[0].Attributes = `{"relayhost":"2"}`
+		_, _, err := Plan(d, Options{SkipMailboxes: []string{"carol@example.org"}, RelayHost: relay, Acknowledge: []string{"mailbox-protocol-restrictions"}})
+		if err == nil || !strings.HasPrefix(err.Error(), "relayhosts-in-use has 1 rows") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("assignment from a skipped mailbox does not count", func(t *testing.T) {
+		d := good()
+		d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25", Active: true})
+		d.Mailboxes[2].Attributes = `{"relayhost":"2"}`
+		_, rep, err := Plan(d, Options{SkipMailboxes: []string{"carol@example.org"}, RelayHost: relay, Acknowledge: []string{"relayhosts-unused"}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, f := range rep.Findings {
-			if f.Item == "relayhosts-differing" && f.Rows != 2 {
-				t.Errorf("rows = %d, want the row and the assignment", f.Rows)
-			}
+		if findingRows(rep, "relayhosts-in-use") != 0 || findingRows(rep, "relayhosts-unused") != 1 {
+			t.Errorf("findings: %+v", rep.Findings)
+		}
+	})
+	t.Run("unused differing row can be acknowledged", func(t *testing.T) {
+		d := good()
+		d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25", Active: true})
+		if _, _, err := Plan(d, opts()); err == nil || !strings.HasPrefix(err.Error(), "relayhosts-unused has 1 rows") {
+			t.Fatalf("err = %v", err)
+		}
+		o := opts()
+		o.Acknowledge = []string{"relayhosts-unused"}
+		if _, _, err := Plan(d, o); err != nil {
+			t.Errorf("acknowledged: %v", err)
+		}
+	})
+	t.Run("inactive differing row assigned to a domain is not in use", func(t *testing.T) {
+		d := good()
+		d.Relayhosts = append(d.Relayhosts, Relayhost{ID: "2", Hostname: "[other.example.test]:25", Active: false})
+		d.Domains[0].RelayhostID = "2"
+		_, rep, err := Plan(d, opts())
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if findingRows(rep, "relayhosts-in-use") != 0 || findingRows(rep, "relayhosts-unused") != 0 {
+			t.Errorf("findings: %+v", rep.Findings)
 		}
 	})
 	t.Run("no expected relay means every row differs", func(t *testing.T) {
 		o := opts()
 		o.RelayHost = ""
-		if _, _, err := Plan(good(), o); err == nil || !strings.HasPrefix(err.Error(), "relayhosts-differing") {
+		if _, _, err := Plan(good(), o); err == nil || !strings.HasPrefix(err.Error(), "relayhosts-unused") {
 			t.Errorf("err = %v", err)
 		}
 	})
@@ -387,7 +443,42 @@ func TestReportNeverPrintsKeys(t *testing.T) {
 	if strings.Contains(out, "BEGIN") || strings.Contains(out, "AAAA") {
 		t.Error("report leaks key material")
 	}
-	if !strings.Contains(out, "not checked: global rspamd maps (files on disk; check data/conf/rspamd/custom/ by hand)") {
-		t.Errorf("missing not-checked line:\n%s", out)
+}
+
+func findingRows(rep Report, item string) int {
+	for _, f := range rep.Findings {
+		if f.Item == item {
+			return f.Rows
+		}
+	}
+	return -1
+}
+
+func TestUncheckedFileItems(t *testing.T) {
+	for _, item := range []string{"sieve-scripts", "shared-folder-acls", "global-rspamd-maps"} {
+		t.Run(item, func(t *testing.T) {
+			d := good()
+			d.Unchecked = map[string]string{item: "MAILCOW_RSPAMD_CUSTOM_DIR is not set"}
+			_, rep, err := Plan(d, opts())
+			if want := "cannot check " + item + ": MAILCOW_RSPAMD_CUSTOM_DIR is not set"; err == nil || err.Error() != want {
+				t.Fatalf("err = %v, want %q", err, want)
+			}
+			var out strings.Builder
+			rep.Write(&out)
+			if !regexp.MustCompile(item + ` +not checked: MAILCOW_RSPAMD_CUSTOM_DIR is not set`).MatchString(out.String()) {
+				t.Errorf("report:\n%s", out.String())
+			}
+			o := opts()
+			o.Acknowledge = []string{item}
+			if _, rep, err := Plan(d, o); err != nil {
+				t.Errorf("acknowledged: %v", err)
+			} else {
+				out.Reset()
+				rep.Write(&out)
+				if !strings.Contains(out.String(), "acknowledged: "+item+" (not checked)") {
+					t.Errorf("report:\n%s", out.String())
+				}
+			}
+		})
 	}
 }

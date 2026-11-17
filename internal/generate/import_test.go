@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kspears/mailstack/internal/store"
 )
@@ -20,9 +21,12 @@ func TestImport(t *testing.T) {
 
 	snap := fixture()
 	snap.Mailboxes[0].Hash = "{BLF-CRYPT}$2y$10$verbatimhashvalue"
-	summary, err := a.Import("cli:alex", snap)
+	summary, replaced, err := a.Import("cli:alex", snap, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if replaced != "" {
+		t.Errorf("replaced = %q on an empty store", replaced)
 	}
 	if summary != "imported 2 domains, 4 mailboxes, 2 aliases" {
 		t.Errorf("summary = %q", summary)
@@ -55,7 +59,7 @@ func TestImport(t *testing.T) {
 		}
 	}
 
-	if _, err := a.Import("cli:alex", snap); err == nil || !strings.Contains(err.Error(), "already holds") {
+	if _, _, err := a.Import("cli:alex", snap, false); err == nil || !strings.Contains(err.Error(), "already holds") {
 		t.Errorf("second import: %v", err)
 	}
 }
@@ -70,7 +74,7 @@ func TestImportInvalidChangesNothing(t *testing.T) {
 		Domains:   []string{"example.test"},
 		Mailboxes: []store.Mailbox{{Address: "Bad Name@example.test", Hash: "{BLF-CRYPT}$2y$10$x", State: store.Active}},
 	}
-	if _, err := a.Import("cli:alex", snap); err == nil || !strings.Contains(err.Error(), `"Bad Name@example.test"`) {
+	if _, _, err := a.Import("cli:alex", snap, false); err == nil || !strings.Contains(err.Error(), `"Bad Name@example.test"`) {
 		t.Fatalf("err = %v", err)
 	}
 	if got, _ := a.Snapshot(); len(got.Domains)+len(got.Mailboxes) != 0 {
@@ -78,5 +82,107 @@ func TestImportInvalidChangesNothing(t *testing.T) {
 	}
 	if log, _ := a.Log(); len(log) != 0 {
 		t.Errorf("log changed: %+v", log)
+	}
+}
+
+func populated(t *testing.T) *Admin {
+	t.Helper()
+	a := newAdmin(t, false)
+	for _, step := range []func() (string, error){
+		func() (string, error) { return a.AddDomain("t", "old.example.test") },
+		func() (string, error) {
+			return a.AddMailbox("t", "keep@old.example.test", "", "correct horse battery", false)
+		},
+	} {
+		if _, err := step(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return a
+}
+
+func TestImportOverwriteFailureKeepsOldAccounts(t *testing.T) {
+	a := populated(t)
+	before := capture(t, a)
+	bad := store.Snapshot{
+		Domains:   []string{"example.test"},
+		Mailboxes: []store.Mailbox{{Address: "Bad Name@example.test", Hash: "{BLF-CRYPT}$2y$10$x", State: store.Active}},
+	}
+	if _, _, err := a.Import("cli:alex", bad, true); err == nil {
+		t.Fatal("import of an invalid snapshot succeeded")
+	}
+	after := capture(t, a)
+	if after.current != before.current || after.users != before.users || after.log != before.log ||
+		!reflect.DeepEqual(after.snap, before.snap) || strings.Join(after.dirs, ",") != strings.Join(before.dirs, ",") {
+		t.Errorf("failed overwrite changed state:\n%+v\n%+v", before, after)
+	}
+	if left, _ := filepath.Glob(a.storePath + ".replaced-*"); len(left) != 0 {
+		t.Errorf("copy left behind after a failed import: %v", left)
+	}
+
+	// Also fails after the rows are cleared and loaded: a generation the watcher rejects.
+	w := startWatcher(t, a)
+	a.cfg.WatcherOff = false
+	a.cfg.Timeout = 300 * time.Millisecond
+	w.set("error main.cf: bad map")
+	if _, _, err := a.Import("cli:alex", fixture(), true); err == nil || !strings.Contains(err.Error(), "postfix rejected") {
+		t.Fatalf("err = %v", err)
+	}
+	after = capture(t, a)
+	if after.current != before.current || !reflect.DeepEqual(after.snap, before.snap) || after.log != before.log {
+		t.Errorf("rejected overwrite changed state: %+v", after)
+	}
+	if left, _ := filepath.Glob(a.storePath + ".replaced-*"); len(left) != 0 {
+		t.Errorf("copy left behind after a rejected import: %v", left)
+	}
+}
+
+func TestImportOverwriteKeepsReadableCopy(t *testing.T) {
+	a := populated(t)
+	old, err := a.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Import("cli:alex", fixture(), false); err == nil {
+		t.Fatal("import over existing accounts needs overwrite")
+	}
+	_, replaced, err := a.Import("cli:alex", fixture(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(replaced, a.storePath+".replaced-") {
+		t.Fatalf("replaced = %q", replaced)
+	}
+	if st, err := os.Stat(replaced); err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("copy: %v %v", st, err)
+	}
+	copied, err := store.Open(replaced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer copied.Close()
+	got, err := copied.Snapshot()
+	if err != nil || !reflect.DeepEqual(got, old) {
+		t.Errorf("copy holds %+v (%v), want %+v", got, err, old)
+	}
+	now, _ := a.Snapshot()
+	if !reflect.DeepEqual(now, fixture()) {
+		t.Errorf("store after overwrite: %+v", now)
+	}
+	domains, _ := os.ReadFile(filepath.Join(a.gens, "current", FileDomains))
+	if string(domains) != "example.org OK\nexample.test OK\n" {
+		t.Errorf("current domains: %q", domains)
+	}
+	log, _ := a.Log()
+	if len(log) < 3 || log[len(log)-1].Action != "import" {
+		t.Errorf("change log was not kept and extended: %+v", log)
+	}
+}
+
+func TestImportDoesNotRequireCurrentToMatch(t *testing.T) {
+	a := populated(t)
+	tamperCurrent(t, a)
+	if _, _, err := a.Import("cli:alex", fixture(), true); err != nil {
+		t.Fatalf("import over a stale current: %v", err)
 	}
 }

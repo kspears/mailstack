@@ -9,7 +9,16 @@ set -eu
 # rewrites on every container start.
 postfix check
 
-/usr/local/bin/watcher.sh &
+# The watcher must outlive its own crashes: without it no generation is ever accepted and every
+# mailctl change times out. Restart it with a pause so a persistent fault cannot spin.
+(
+	while :; do
+		status=0
+		/usr/local/bin/watcher.sh || status=$? # not bare: `set -e` would end this loop with it
+		echo "entrypoint: watcher exited with status $status; restarting in 1s"
+		sleep 1
+	done
+) &
 
 # exec so postfix is PID 1 and receives SIGTERM for a graceful stop.
 exec postfix start-fg

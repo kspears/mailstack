@@ -1,6 +1,7 @@
 package access
 
 import (
+	"context"
 	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
@@ -172,5 +173,22 @@ func TestDev(t *testing.T) {
 	got, err := Dev{Email: "dev@example.test"}.Identify(httptest.NewRequest(http.MethodGet, "/", nil))
 	if err != nil || got != "dev@example.test" {
 		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+// The cache records a fetch attempt even when it fails, so a fetch tied to one
+// request's context would let a single cancelled request block key refreshes.
+func TestKeyFetchHasItsOwnTimeout(t *testing.T) {
+	var hasDeadline bool
+	src := func(ctx context.Context) (map[string]*rsa.PublicKey, error) {
+		_, hasDeadline = ctx.Deadline()
+		return map[string]*rsa.PublicKey{"k1": &newKey(t).PublicKey}, nil
+	}
+	cf := newCloudflare("team.example.test", testAUD, nil, src, func() time.Time { return testNow })
+	if _, err := cf.keys.get("k1"); err != nil {
+		t.Fatal(err)
+	}
+	if !hasDeadline {
+		t.Error("the key fetch has no timeout")
 	}
 }

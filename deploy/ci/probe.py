@@ -3,12 +3,14 @@ untrusted client exactly as it would see the internet. Each subcommand exits non
 failure and prints one line on success."""
 
 import imaplib
+import json
 import os
 import smtplib
 import socket
 import ssl
 import sys
 import time
+import urllib.request
 from email.message import EmailMessage
 
 SMTP = "postfix"
@@ -144,6 +146,55 @@ def auth_needs_tls(user, password):
     print("587 offers no AUTH before STARTTLS")
 
 
+def move(user, password, subject, source, dest):
+    """Move a message between folders the way a mail client does: copy, flag, expunge."""
+    with imaplib.IMAP4_SSL(IMAP, 993, ssl_context=TLS) as imap:
+        imap.login(user, password)
+        if imap.select(source)[0] != "OK":
+            fail(f"cannot open {source}")
+        _, ids = imap.search(None, "SUBJECT", f'"{subject}"')
+        if not ids[0]:
+            fail(f"'{subject}' is not in {source}")
+        num = ids[0].split()[0]
+        if imap.copy(num, dest)[0] != "OK":
+            fail(f"copy to {dest} failed")
+        imap.store(num, "+FLAGS", "\\Deleted")
+        imap.expunge()
+    print(f"moved '{subject}' from {source} to {dest}")
+
+
+def controller(path):
+    """GET from rspamd's controller; the password is mounted into this container."""
+    with open("/rspamd-controller-password") as f:
+        password = f.read().strip()
+    req = urllib.request.Request(f"http://rspamd:11334{path}", headers={"Password": password})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.load(resp)
+
+
+def learned(cls):
+    """How many messages rspamd's classifier has learned in class 'spam' or 'ham'."""
+    for statfile in controller("/stat")["statfiles"]:
+        if statfile["class"] == cls:
+            return statfile["revision"]
+    fail(f"rspamd reports no {cls} statfile")
+
+
+def show_learned(cls):
+    print(learned(cls))
+
+
+def wait_learned(cls, want):
+    """Block until rspamd has learned at least `want` messages of the class."""
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if learned(cls) >= int(want):
+            print(f"rspamd has learned {want} as {cls}")
+            return
+        time.sleep(1)
+    fail(f"rspamd never reached {want} learned as {cls} (is at {learned(cls)})")
+
+
 def main():
     cmd, args = sys.argv[1], sys.argv[2:]
     funcs = {
@@ -156,12 +207,15 @@ def main():
         "forged-sender": forged_sender,
         "submission-ok": submission_ok,
         "auth-needs-tls": auth_needs_tls,
+        "move": move,
+        "learned": show_learned,
+        "wait-learned": wait_learned,
     }
     if cmd not in funcs:
         fail(f"unknown command {cmd}")
     try:
         funcs[cmd](*args)
-    except (smtplib.SMTPException, imaplib.IMAP4.error, OSError) as e:
+    except (smtplib.SMTPException, imaplib.IMAP4.error, OSError, KeyError, ValueError) as e:
         fail(f"{cmd}: {e!r}")
 
 

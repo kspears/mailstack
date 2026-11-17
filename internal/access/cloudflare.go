@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	jwtHeader     = "Cf-Access-Jwt-Assertion"
-	clockSkew     = 60 * time.Second
-	keyMaxAge     = time.Hour
-	keyMinRefetch = time.Minute
-	maxJWKSBytes  = 1 << 20
+	jwtHeader       = "Cf-Access-Jwt-Assertion"
+	clockSkew       = 60 * time.Second
+	keyMaxAge       = time.Hour
+	keyMinRefetch   = time.Minute
+	keyFetchTimeout = 5 * time.Second
+	maxJWKSBytes    = 1 << 20
 )
 
 // KeySource returns the team's current signing keys by key id.
@@ -87,7 +88,7 @@ func (c *Cloudflare) Identify(r *http.Request) (string, error) {
 	if header.Alg != "RS256" {
 		return "", fmt.Errorf("token alg %q is not RS256", header.Alg)
 	}
-	key, err := c.keys.get(r.Context(), header.Kid)
+	key, err := c.keys.get(header.Kid)
 	if err != nil {
 		return "", err
 	}
@@ -174,7 +175,7 @@ type keyCache struct {
 	fetched time.Time
 }
 
-func (k *keyCache) get(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+func (k *keyCache) get(kid string) (*rsa.PublicKey, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	now := k.now()
@@ -185,6 +186,11 @@ func (k *keyCache) get(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 	if !k.fetched.IsZero() && age < keyMinRefetch {
 		return nil, fmt.Errorf("unknown signing key %q", kid)
 	}
+	// Not the request's context: k.fetched is set whether or not the fetch worked, so a
+	// request that was cancelled mid-fetch would otherwise leave every other request
+	// without keys for keyMinRefetch.
+	ctx, cancel := context.WithTimeout(context.Background(), keyFetchTimeout)
+	defer cancel()
 	keys, err := k.src(ctx)
 	k.fetched = now
 	if err != nil {

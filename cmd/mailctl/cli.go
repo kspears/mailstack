@@ -33,7 +33,7 @@ const usage = `mailctl mailbox list|add|passwd|state|remove ...
        mailctl alias list|add|remove ...
        mailctl sendas list|add|remove ...
        mailctl domain list|add|remove ...
-       mailctl log | apply | serve | import-mailcow`
+       mailctl log | apply [--publish-empty] | serve | import-mailcow | learn spam|ham | install-self <directory>`
 
 func run(args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
 	e := &env{getenv, stdin, stdout, stderr}
@@ -67,6 +67,10 @@ func (e *env) dispatch(args []string) error {
 		return e.serve(rest)
 	case "import-mailcow":
 		return e.importMailcow(rest)
+	case "learn":
+		return e.learn(rest)
+	case "install-self":
+		return e.installSelf(rest)
 	}
 	if !slices.Contains([]string{"mailbox", "alias", "sendas", "domain", "log", "apply"}, cmd) {
 		return usageError(usage)
@@ -75,7 +79,11 @@ func (e *env) dispatch(args []string) error {
 	if err != nil {
 		return err
 	}
-	admin, err := generate.Open(cfg)
+	open := generate.Open
+	if cmd == "apply" {
+		open = generate.OpenForResync
+	}
+	admin, err := open(cfg)
 	if err != nil {
 		return err
 	}
@@ -92,8 +100,20 @@ func (e *env) dispatch(args []string) error {
 	case "log":
 		return e.log(admin, rest)
 	default:
-		return e.ok(admin.Apply(e.actor()))
+		return e.apply(admin, rest)
 	}
+}
+
+func (e *env) apply(a *generate.Admin, args []string) error {
+	const u = "apply [--publish-empty]"
+	var publishEmpty bool
+	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&publishEmpty, "publish-empty", false, "")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return usageError(u)
+	}
+	return e.ok(a.Apply(e.actor(), publishEmpty))
 }
 
 func (e *env) ok(summary string, err error) error {

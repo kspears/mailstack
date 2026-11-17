@@ -22,6 +22,10 @@ type Data struct {
 	// keyed by item name. A table that does not exist counts as zero.
 	Counts map[string]int
 
+	// Unchecked maps a stop item that could not be counted (its directory is not
+	// set or not readable) to the reason. It is a stop unless acknowledged.
+	Unchecked map[string]string
+
 	// DKIMSelectors maps a domain to its selector; DKIMKeys maps
 	// "<selector>.<domain>" to a PEM private key.
 	DKIMSelectors map[string]string
@@ -63,4 +67,5 @@ type SenderACL struct {
 type Relayhost struct {
 	ID       string
 	Hostname string
+	Active   bool
 }

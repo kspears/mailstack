@@ -107,8 +107,8 @@ type Store struct{ db *sql.DB }
 
 // Open opens or creates the database at path and migrates its schema.
 func Open(path string) (*Store, error) {
-	if f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o600); err == nil {
-		f.Close()
+	if err := private(path); err != nil {
+		return nil, err
 	}
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(10000)")
@@ -123,6 +123,27 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}
 	return s, nil
+}
+
+// private creates path with mode 0600 if missing and tightens it if it is looser:
+// the file holds every password hash.
+func private(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("restrict %s to its owner: %w", path, err)
+	}
+	return nil
 }
 
 func (s *Store) migrate() error {
@@ -151,6 +172,15 @@ func (s *Store) migrate() error {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// CopyTo writes a consistent copy of the whole database, change log included, to
+// path, which must not exist. VACUUM INTO takes WAL and journal state into account.
+func (s *Store) CopyTo(path string) error {
+	if _, err := s.db.Exec("VACUUM INTO ?", path); err != nil {
+		return fmt.Errorf("copy the account store to %s: %w", path, err)
+	}
+	return os.Chmod(path, 0o600)
+}
 
 type querier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
@@ -273,6 +303,16 @@ func (t *Tx) Rollback() {
 }
 
 func (t *Tx) Snapshot() (Snapshot, error) { return snapshot(t.tx) }
+
+// Clear deletes every domain, mailbox, alias and send-as grant. The change log stays.
+func (t *Tx) Clear() error {
+	for _, table := range []string{"sendas", "alias_targets", "aliases", "mailboxes", "domains"} {
+		if _, err := t.tx.Exec("DELETE FROM " + table); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (t *Tx) AddDomain(name string) error {
 	_, err := t.tx.Exec("INSERT INTO domains (name) VALUES (?)", name)

@@ -18,7 +18,7 @@ const (
 		COALESCE(attributes, '') FROM mailbox ORDER BY username`
 	queryAliases     = `SELECT address, goto, active FROM alias ORDER BY address`
 	querySenderACLs  = `SELECT logged_in_as, send_as, external FROM sender_acl ORDER BY id`
-	queryRelayhosts  = `SELECT CAST(id AS CHAR), hostname FROM relayhosts ORDER BY id`
+	queryRelayhosts  = `SELECT CAST(id AS CHAR), hostname, active FROM relayhosts ORDER BY id`
 	queryTableExists = `SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_schema = DATABASE() AND table_name = ?`
 )
@@ -45,10 +45,15 @@ const (
 	redisRateLimits    = "RL_VALUE"
 )
 
-// Live reads a running mailcow: MySQL for accounts, Redis for DKIM keys and rate limits.
+// Live reads a running mailcow: MySQL for accounts, Redis for DKIM keys and rate
+// limits, and two directories for what only exists as files: the mail root (user
+// Sieve scripts, folder ACLs) and rspamd's custom map directory. An empty path
+// makes the items that need it unchecked, which the plan reports as a stop.
 type Live struct {
-	DB    *sql.DB
-	Redis *Redis
+	DB              *sql.DB
+	Redis           *Redis
+	MailRoot        string
+	RspamdCustomDir string
 }
 
 func (l Live) Read(ctx context.Context) (Data, error) {
@@ -64,6 +69,7 @@ func (l Live) Read(ctx context.Context) (Data, error) {
 	if err := l.readRedis(&d); err != nil {
 		return d, err
 	}
+	l.readFiles(&d)
 	return d, nil
 }
 
@@ -99,7 +105,7 @@ func readSQL(ctx context.Context, tx *sql.Tx, d *Data) error {
 		}},
 		{"relayhosts", queryRelayhosts, func(r *sql.Rows) error {
 			var x Relayhost
-			err := r.Scan(&x.ID, &x.Hostname)
+			err := r.Scan(&x.ID, &x.Hostname, &x.Active)
 			d.Relayhosts = append(d.Relayhosts, x)
 			return err
 		}},

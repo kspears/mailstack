@@ -1,7 +1,9 @@
 #!/bin/sh
 # Generation watcher. mailctl renders a new generation directory and points
 # generations/pending at it; this script checks it with postfix's own tools and reports the
-# verdict in generations/status. When generations/current moves it reloads postfix.
+# verdict in watcher/status (a sibling of generations/, so this container can mount
+# generations read-only and write only the one directory it owns). When generations/current
+# moves it reloads postfix.
 #
 # Level-triggered on purpose: every pass compares what the symlinks say now with what was last
 # handled, so a missed tick, a restart or a slow start loses nothing. It never moves `current`
@@ -14,7 +16,8 @@ CONF=${POSTFIX_CONFIG_DIR:-/etc/postfix}
 INTERVAL=${WATCHER_INTERVAL:-1}
 
 GENS=$STATE/generations
-STATUS=$GENS/status
+WATCHER=$STATE/watcher
+STATUS=$WATCHER/status
 
 # Every file a complete generation must contain, and which of them are postfix lookup tables.
 MAPS="postfix/domains postfix/mailboxes postfix/aliases postfix/sender_login"
@@ -28,9 +31,9 @@ gen_id() {
 	printf '%s' "${t##*/}"
 }
 
-# Write generations/status atomically. mailctl polls it, so a torn write must not be visible.
+# Write watcher/status atomically. mailctl polls it, so a torn write must not be visible.
 write_status() {
-	tmp=$GENS/.status.$$
+	tmp=$WATCHER/.status.$$
 	printf '%s\n' "$1" >"$tmp" && mv -f "$tmp" "$STATUS" && return 0
 	rm -f "$tmp"
 	log "cannot write $STATUS"

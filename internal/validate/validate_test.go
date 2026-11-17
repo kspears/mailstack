@@ -128,6 +128,18 @@ func TestConsistency(t *testing.T) {
 				{Address: "d@example.test", Targets: []string{"alice@example.test"}},
 			}
 		}, ""},
+		{"mailbox name with plus", func(s *store.Snapshot) {
+			s.Mailboxes = append(s.Mailboxes, mb("a+b@example.test", store.Active))
+		}, `a+b@example.test: "+" is reserved for plus-addressing and cannot be part of a mailbox or alias name`},
+		{"alias name with plus", func(s *store.Snapshot) {
+			s.Aliases = []store.Alias{{Address: "in+fo@example.test", Targets: []string{"alice@example.test"}}}
+		}, `in+fo@example.test: "+" is reserved for plus-addressing`},
+		{"hosted target with plus", func(s *store.Snapshot) {
+			s.Aliases = []store.Alias{{Address: "info@example.test", Targets: []string{"alice+news@example.test"}}}
+		}, "target the base address alice@example.test"},
+		{"external target with plus", func(s *store.Snapshot) {
+			s.Aliases = []store.Alias{{Address: "info@example.test", Targets: []string{"me+news@example.net"}}}
+		}, ""},
 		{"grant for missing mailbox", func(s *store.Snapshot) {
 			s.Grants = []store.Grant{{Mailbox: "ghost@example.test", Address: "x@example.test"}}
 		}, "no such mailbox"},
@@ -150,5 +162,16 @@ func TestConsistency(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestHostedName(t *testing.T) {
+	if got, err := HostedName("Alice@Example.Test"); err != nil || got != "alice@example.test" {
+		t.Errorf("HostedName = %q, %v", got, err)
+	}
+	for _, bad := range []string{"a+b@example.test", "+@example.test", "@example.test"} {
+		if _, err := HostedName(bad); err == nil {
+			t.Errorf("HostedName(%q) accepted", bad)
+		}
 	}
 }

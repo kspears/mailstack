@@ -35,12 +35,14 @@ var stopItems = []stopItem{
 	{"bcc-maps", true},
 	{"recipient-maps", true},
 	{"transport-maps", true},
-	{"relayhosts-differing", true},
+	{"relayhosts-in-use", false},
+	{"relayhosts-unused", true},
 	{"temporary-aliases", true},
 	{"sync-jobs", true},
 	{"forwarding-hosts", true},
 	{"domain-footers", true},
 	{"sieve-filters", true},
+	{"sieve-scripts", true},
 	{"mailbox-protocol-restrictions", true},
 	{"spam-settings", true},
 	{"rate-limits", true},
@@ -48,6 +50,8 @@ var stopItems = []stopItem{
 	{"tfa", true},
 	{"inactive-aliases", true},
 	{"external-send-as", true},
+	{"shared-folder-acls", true},
+	{"global-rspamd-maps", true},
 }
 
 // ParseAcknowledge validates item names given to --acknowledge.
@@ -76,10 +80,12 @@ func itemNames() []string {
 	return out
 }
 
-// Finding is the count for one stop item.
+// Finding is the count for one stop item. Unchecked is the reason the item could
+// not be counted at all; Rows is then 0 and means nothing.
 type Finding struct {
 	Item         string
 	Rows         int
+	Unchecked    string
 	Acknowledged bool
 }
 
@@ -128,12 +134,16 @@ func Plan(d Data, o Options) (store.Snapshot, Report, error) {
 		if !ok {
 			n = d.Counts[item.name]
 		}
-		rep.Findings = append(rep.Findings, Finding{item.name, n, n > 0 && ack[item.name]})
+		why := d.Unchecked[item.name]
+		rep.Findings = append(rep.Findings, Finding{item.name, n, why, (n > 0 || why != "") && ack[item.name]})
 	}
 	if p.err != nil {
 		return store.Snapshot{}, rep, p.err
 	}
 	for _, f := range rep.Findings {
+		if f.Unchecked != "" && !f.Acknowledged {
+			return store.Snapshot{}, rep, fmt.Errorf("cannot check %s: %s", f.Item, f.Unchecked)
+		}
 		if f.Rows > 0 && !f.Acknowledged {
 			return store.Snapshot{}, rep, fmt.Errorf("%s has %d rows and no destination", f.Item, f.Rows)
 		}
@@ -283,31 +293,54 @@ func restricted(raw string) bool {
 
 func hasRelayhost(id string) bool { return id != "" && id != "0" }
 
+// relayhosts redundant-drops rows equal to the new relay and counts the rest. A
+// differing row that no domain and no carried mailbox uses is only left behind
+// (relayhosts-unused). A domain or carried mailbox assigned to a differing active
+// row would silently start relaying differently, so that is relayhosts-in-use and
+// can never be acknowledged. mailcow does not use an inactive row, so an
+// assignment to one is not in use, but the row is still not unused.
 func (p *planner) relayhosts() {
 	p.relays = map[string]string{}
-	var differing int
+	differs := map[string]bool{}
 	for _, r := range p.d.Relayhosts {
 		p.relays[r.ID] = r.Hostname
 		if sameRelay(r.Hostname, p.o.RelayHost) {
 			p.rep.RedundantRelayhosts++
 			continue
 		}
-		differing++
+		differs[r.ID] = true
 	}
-	assigned := func(id string) {
-		if hasRelayhost(id) && !sameRelay(p.relays[id], p.o.RelayHost) {
-			differing++
+	active := map[string]bool{}
+	for _, r := range p.d.Relayhosts {
+		active[r.ID] = r.Active
+	}
+	var inUse int
+	assigned := map[string]bool{}
+	assign := func(id string) {
+		if !hasRelayhost(id) || sameRelay(p.relays[id], p.o.RelayHost) {
+			return
+		}
+		assigned[id] = true
+		if _, known := p.relays[id]; !known || active[id] {
+			inUse++
 		}
 	}
 	for _, d := range p.d.Domains {
-		assigned(d.RelayhostID)
+		assign(d.RelayhostID)
 	}
 	for _, m := range p.d.Mailboxes {
 		if m.Active != 0 {
-			assigned(attributes(m.Attributes)["relayhost"])
+			assign(attributes(m.Attributes)["relayhost"])
 		}
 	}
-	p.counts["relayhosts-differing"] = differing
+	var unused int
+	for id := range differs {
+		if !assigned[id] {
+			unused++
+		}
+	}
+	p.counts["relayhosts-in-use"] = inUse
+	p.counts["relayhosts-unused"] = unused
 }
 
 func sameRelay(a, b string) bool { return b != "" && norm(a) == norm(b) }

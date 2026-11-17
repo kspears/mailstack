@@ -71,13 +71,23 @@ func orDefault(s, def string) string {
 
 // Admin owns the store and applies every change to it.
 type Admin struct {
-	cfg  Config
-	st   *store.Store
-	gens string
+	cfg       Config
+	st        *store.Store
+	gens      string
+	storePath string
 }
 
-// Open creates the state directory if needed and opens the store.
-func Open(cfg Config) (*Admin, error) {
+// Open creates the state directory if needed and opens the store. It refuses to
+// create a store while generated files exist: a missing store.db next to a
+// populated generations/current means the store was lost, not that this is a
+// fresh install.
+func Open(cfg Config) (*Admin, error) { return open(cfg, false) }
+
+// OpenForResync is Open for the two commands that may start from a missing
+// store: apply and the mailcow import.
+func OpenForResync(cfg Config) (*Admin, error) { return open(cfg, true) }
+
+func open(cfg Config, createStore bool) (*Admin, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -88,11 +98,40 @@ func Open(cfg Config) (*Admin, error) {
 	if err := os.MkdirAll(gens, 0o755); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}
-	st, err := store.Open(filepath.Join(cfg.State, "store.db"))
+	if err := makeDir(watcherDir(cfg)); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(cfg.State, "store.db")
+	if !createStore {
+		if err := refuseLostStore(path, gens); err != nil {
+			return nil, err
+		}
+	}
+	st, err := store.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Admin{cfg: cfg, st: st, gens: gens}, nil
+	return &Admin{cfg: cfg, st: st, gens: gens, storePath: path}, nil
+}
+
+// watcherDir is the only state directory the internet-facing postfix container may write.
+func watcherDir(cfg Config) string { return filepath.Join(cfg.State, "watcher") }
+
+func makeDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	return os.Chmod(dir, 0o755)
+}
+
+func refuseLostStore(path, gens string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if _, err := os.Lstat(filepath.Join(gens, "current")); err != nil {
+		return nil
+	}
+	return fmt.Errorf("account store %s is missing but generated files exist; restore it from backup", path)
 }
 
 func (a *Admin) Close() error { return a.st.Close() }
@@ -111,15 +150,17 @@ type change struct{ action, subject, summary string }
 
 // change runs fn in a store transaction and applies the result as a new
 // generation. Either both the store and the daemons' files move, or neither.
+// It refuses to run when the files in use are not what the store renders.
 func (a *Admin) change(actor string, fn func(tx *store.Tx, snap store.Snapshot) (change, error)) (string, error) {
+	return a.run(actor, a.requireCurrentMatches, fn)
+}
+
+func (a *Admin) run(actor string, guard func(store.Snapshot) error, fn func(tx *store.Tx, snap store.Snapshot) (change, error)) (string, error) {
 	unlock, err := a.lock()
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
-	if err := a.ensureCurrent(); err != nil {
-		return "", err
-	}
 	tx, err := a.st.Begin()
 	if err != nil {
 		return "", err
@@ -129,10 +170,18 @@ func (a *Admin) change(actor string, fn func(tx *store.Tx, snap store.Snapshot) 
 	if err != nil {
 		return "", err
 	}
+	if err := guard(before); err != nil {
+		return "", err
+	}
 	c, err := fn(tx, before)
 	if err != nil {
 		return "", err
 	}
+	return a.finish(tx, actor, c)
+}
+
+// finish validates what the transaction holds, applies it as one generation and commits.
+func (a *Admin) finish(tx *store.Tx, actor string, c change) (string, error) {
 	after, err := tx.Snapshot()
 	if err != nil {
 		return "", err
@@ -156,9 +205,22 @@ func (a *Admin) change(actor string, fn func(tx *store.Tx, snap store.Snapshot) 
 	return c.summary, nil
 }
 
-// Apply re-renders from the store and applies even if nothing changed.
-func (a *Admin) Apply(actor string) (string, error) {
-	return a.change(actor, func(*store.Tx, store.Snapshot) (change, error) {
+// Apply renders the store as it is and applies it, even if nothing changed and
+// even if the files in use disagree with it: it is the explicit resync. It
+// refuses to publish an empty store over files that list domains unless
+// publishEmpty is set, because an empty store usually means store.db was lost.
+func (a *Admin) Apply(actor string, publishEmpty bool) (string, error) {
+	guard := func(before store.Snapshot) error {
+		if publishEmpty || len(before.Domains) > 0 {
+			return nil
+		}
+		have, exists, err := a.currentFiles()
+		if err != nil || !exists || have[FileDomains] == "" {
+			return nil
+		}
+		return errors.New("the account store is empty but the files in use are not; refusing to remove every account. Restore store.db from backup, or pass --publish-empty if this is intended")
+	}
+	return a.run(actor, guard, func(*store.Tx, store.Snapshot) (change, error) {
 		return change{"apply", "-", "applied current account set"}, nil
 	})
 }
@@ -175,21 +237,32 @@ func (a *Admin) lock() (func(), error) {
 	return func() { f.Close() }, nil
 }
 
-// ensureCurrent re-renders when current is missing or no longer matches the store.
-func (a *Admin) ensureCurrent() error {
-	snap, err := a.st.Snapshot()
-	if err != nil {
-		return err
+// currentFiles reads generations/current. exists is false before the first generation.
+func (a *Admin) currentFiles() (files Files, exists bool, err error) {
+	link := filepath.Join(a.gens, "current")
+	if _, err := os.Lstat(link); errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
 	}
-	want := Render(snap, a.cfg)
-	if have, err := Read(filepath.Join(a.gens, "current")); err == nil && have.Equal(want) {
+	files, err = Read(link)
+	return files, true, err
+}
+
+// requireCurrentMatches refuses a change when generations/current is not what the
+// store renders: publishing from a store that was replaced or restored would
+// silently remove accounts from the daemons.
+func (a *Admin) requireCurrentMatches(snap store.Snapshot) error {
+	have, exists, err := a.currentFiles()
+	if !exists {
 		return nil
 	}
-	id, err := a.deploy(want)
+	const msg = `the files in use do not match the account store (was the store replaced or restored?); check with "mailctl mailbox list", then run "mailctl apply" to publish the store as it is`
 	if err != nil {
-		return fmt.Errorf("resync generated files with the store: %w", err)
+		return fmt.Errorf("%s: %w", msg, err)
 	}
-	return a.promote(id)
+	if !have.Equal(Render(snap, a.cfg)) {
+		return errors.New(msg)
+	}
+	return nil
 }
 
 // deploy writes and checks a generation, then waits for the watcher to accept it.
@@ -210,6 +283,10 @@ func (a *Admin) deploy(files Files) (string, error) {
 		os.RemoveAll(tmp)
 		return "", fmt.Errorf("install generation %s: %w", id, err)
 	}
+	if err := syncPath(a.gens); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
 	if a.cfg.WatcherOff {
 		return id, nil
 	}
@@ -228,7 +305,7 @@ func (a *Admin) deploy(files Files) (string, error) {
 func (a *Admin) wait(id string) error {
 	deadline := time.Now().Add(a.cfg.Timeout)
 	for {
-		if b, err := os.ReadFile(filepath.Join(a.gens, "status")); err == nil {
+		if b, err := os.ReadFile(filepath.Join(watcherDir(a.cfg), "status")); err == nil {
 			got, rest, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
 			if got == id {
 				if rest == "ok" {
@@ -278,23 +355,58 @@ func (a *Admin) prune() {
 	}
 }
 
+// writeGeneration writes every file and makes the result durable: the files are
+// fsynced, then the directories that hold them.
 func writeGeneration(dir string, files Files) error {
 	for _, name := range fileNames {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, []byte(files[name]), 0o644); err != nil {
-			return err
-		}
-		if err := os.Chmod(path, 0o644); err != nil {
+		if err := writeSynced(path, files[name]); err != nil {
 			return err
 		}
 	}
-	for _, d := range []string{dir, filepath.Join(dir, "dovecot"), filepath.Join(dir, "postfix")} {
+	for _, d := range []string{filepath.Join(dir, "dovecot"), filepath.Join(dir, "postfix"), dir} {
 		if err := os.Chmod(d, 0o755); err != nil {
 			return err
 		}
+		if err := syncPath(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeSynced(path, content string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// syncPath fsyncs a file or directory.
+func syncPath(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("fsync %s: %w", path, err)
 	}
 	return nil
 }
@@ -309,5 +421,5 @@ func symlinkReplace(link, target string) error {
 		os.Remove(tmp)
 		return err
 	}
-	return nil
+	return syncPath(filepath.Dir(link))
 }

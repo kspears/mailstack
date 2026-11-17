@@ -69,7 +69,7 @@ func (a *Admin) RemoveDomain(actor, domain string) (string, error) {
 // AddMailbox creates an active mailbox with a bcrypt-hashed password. It refuses
 // an address whose mail directory already exists unless adoptExisting is set.
 func (a *Admin) AddMailbox(actor, address, name, password string, adoptExisting bool) (string, error) {
-	addr, err := validate.Address(address)
+	addr, err := validate.HostedName(address)
 	if err != nil {
 		return "", err
 	}
@@ -155,7 +155,7 @@ func (a *Admin) RemoveMailbox(actor, address string) (string, error) {
 }
 
 func (a *Admin) AddAlias(actor, address string, targets []string) (string, error) {
-	addr, err := validate.Address(address)
+	addr, err := validate.HostedName(address)
 	if err != nil {
 		return "", err
 	}

@@ -158,7 +158,7 @@ func startWatcher(t *testing.T, a *Admin) *watcher {
 				continue
 			}
 			last = id
-			os.WriteFile(filepath.Join(a.gens, "status"), []byte(id+" "+v+"\n"), 0o644)
+			os.WriteFile(filepath.Join(watcherDir(a.cfg), "status"), []byte(id+" "+v+"\n"), 0o644)
 		}
 	}()
 	t.Cleanup(func() { close(w.stop); <-done })
@@ -307,6 +307,9 @@ func TestOperations(t *testing.T) {
 		{"existing mail adopted", func() (string, error) { return a.AddMailbox("t", "old@example.test", "", pw, true) }, "added mailbox old@example.test", ""},
 		{"alias collides with mailbox", func() (string, error) { return a.AddAlias("t", "alice@example.test", []string{"old@example.test"}) }, "", "already a mailbox"},
 		{"alias to unknown local target", func() (string, error) { return a.AddAlias("t", "info@example.test", []string{"ghost@example.test"}) }, "", "not a mailbox or alias"},
+		{"mailbox name with plus", func() (string, error) { return a.AddMailbox("t", "a+b@example.test", "", pw, false) }, "", `"+" is reserved for plus-addressing`},
+		{"alias name with plus", func() (string, error) { return a.AddAlias("t", "a+b@example.test", []string{"alice@example.test"}) }, "", `"+" is reserved for plus-addressing`},
+		{"hosted alias target with plus", func() (string, error) { return a.AddAlias("t", "plus@example.test", []string{"alice+x@example.test"}) }, "", "target the base address alice@example.test"},
 		{"catch-all alias", func() (string, error) { return a.AddAlias("t", "@example.test", []string{"alice@example.test"}) }, "", "catch-all"},
 		{"add alias", func() (string, error) {
 			return a.AddAlias("t", "info@example.test", []string{"alice@example.test", "me@example.org"})
@@ -354,13 +357,13 @@ func TestOperations(t *testing.T) {
 	}
 }
 
-func TestResyncAndPrune(t *testing.T) {
+func TestPrune(t *testing.T) {
 	a := newAdmin(t, false)
 	if _, err := a.AddDomain("t", "example.test"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 12; i++ {
-		if _, err := a.Apply("t"); err != nil {
+		if _, err := a.Apply("t", false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -375,16 +378,126 @@ func TestResyncAndPrune(t *testing.T) {
 		t.Errorf("%d generations kept, want %d", dirs, keepGenerations)
 	}
 
+}
+
+func tamperCurrent(t *testing.T, a *Admin) {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(a.gens, "current", FileDomains), []byte("tampered.test OK\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.Readlink(filepath.Join(a.gens, "current"))
-	if _, err := a.AddDomain("t", "example.org"); err != nil {
+}
+
+func TestMismatchRefusesChangesAndApplyResyncs(t *testing.T) {
+	a := newAdmin(t, false)
+	if _, err := a.AddDomain("t", "example.test"); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.Readlink(filepath.Join(a.gens, "current"))
-	got, _ := os.ReadFile(filepath.Join(a.gens, "current", FileDomains))
-	if before == after || string(got) != "example.org OK\nexample.test OK\n" {
-		t.Errorf("current not resynced: %s -> %s, domains %q", before, after, got)
+	tamperCurrent(t, a)
+	before := capture(t, a)
+
+	_, err := a.AddDomain("t", "example.org")
+	if err == nil || !strings.Contains(err.Error(), "the files in use do not match the account store") ||
+		!strings.Contains(err.Error(), `run "mailctl apply" to publish the store as it is`) {
+		t.Fatalf("error = %v", err)
+	}
+	after := capture(t, a)
+	if after.current != before.current || after.log != before.log || len(after.snap.Domains) != 1 ||
+		strings.Join(after.dirs, ",") != strings.Join(before.dirs, ",") {
+		t.Errorf("a refused change moved something: %+v -> %+v", before, after)
+	}
+	if got, _ := os.ReadFile(filepath.Join(a.gens, "current", FileDomains)); string(got) != "tampered.test OK\n" {
+		t.Errorf("current was rewritten: %q", got)
+	}
+
+	if _, err := a.Apply("t", false); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(a.gens, "current", FileDomains)); string(got) != "example.test OK\n" {
+		t.Errorf("apply did not resync: %q", got)
+	}
+	if _, err := a.AddDomain("t", "example.org"); err != nil {
+		t.Errorf("change after resync: %v", err)
+	}
+}
+
+func TestApplyRefusesEmptyStoreOverPopulatedFiles(t *testing.T) {
+	a := newAdmin(t, false)
+	if _, err := a.AddDomain("t", "example.test"); err != nil {
+		t.Fatal(err)
+	}
+	// A replaced store.db: same state directory, fresh empty database.
+	a.Close()
+	if err := os.Remove(a.storePath); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := OpenForResync(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	before := capture(t, fresh)
+
+	if _, err := fresh.AddDomain("t", "example.org"); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Errorf("change against an empty store: %v", err)
+	}
+	const want = "the account store is empty but the files in use are not; refusing to remove every account. Restore store.db from backup, or pass --publish-empty if this is intended"
+	if _, err := fresh.Apply("t", false); err == nil || err.Error() != want {
+		t.Fatalf("apply: %v", err)
+	}
+	if after := capture(t, fresh); after.current != before.current || after.users != before.users {
+		t.Error("a refused apply moved current")
+	}
+	if _, err := fresh.Apply("t", true); err != nil {
+		t.Fatalf("apply --publish-empty: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(fresh.gens, "current", FileDomains)); len(got) != 0 {
+		t.Errorf("domains after publishing empty: %q", got)
+	}
+}
+
+func TestOpenRefusesToCreateLostStore(t *testing.T) {
+	a := newAdmin(t, false)
+	if _, err := a.AddDomain("t", "example.test"); err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	if err := os.Remove(a.storePath); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(a.cfg)
+	if want := "account store " + a.storePath + " is missing but generated files exist; restore it from backup"; err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	if _, err := os.Stat(a.storePath); err == nil {
+		t.Error("store.db was created")
+	}
+
+	fresh := Config{State: t.TempDir(), MailRoot: t.TempDir()}
+	b, err := Open(fresh)
+	if err != nil {
+		t.Fatalf("first bootstrap: %v", err)
+	}
+	b.Close()
+}
+
+func TestStoreIsPrivate(t *testing.T) {
+	a := newAdmin(t, false)
+	if st, err := os.Stat(a.storePath); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("store.db: %v %v", st, err)
+	}
+	a.Close()
+	if err := os.Chmod(a.storePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Open(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if st, _ := os.Stat(a.storePath); st.Mode().Perm() != 0o600 {
+		t.Errorf("mode after open = %v", st.Mode().Perm())
+	}
+	if st, err := os.Stat(watcherDir(a.cfg)); err != nil || !st.IsDir() || st.Mode().Perm() != 0o755 {
+		t.Errorf("watcher dir: %v %v", st, err)
 	}
 }
