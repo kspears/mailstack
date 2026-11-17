@@ -32,3 +32,10 @@ button, .button { display: block; margin-top: 1rem; background: var(--accent); c
 button.danger, .button.danger { background: var(--danger); border-color: var(--danger); color: var(--bg); }
 button.plain, .button.plain { background: transparent; color: var(--fg); border-color: var(--line); }
 code.secret { font-size: 1.25rem; user-select: all; overflow-wrap: anywhere; color: var(--fg); }
+main.wide { max-width: 64rem; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+th, td { text-align: left; padding: .5rem 1.25rem .5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; }
+td:first-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+td:last-child { white-space: normal; overflow-wrap: break-word; width: 100%; min-width: 16rem; }

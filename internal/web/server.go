@@ -62,7 +62,7 @@ func New(cfg Config) (http.Handler, error) {
 	if _, err := rand.Read(s.csrfKey); err != nil {
 		return nil, fmt.Errorf("generate CSRF key: %w", err)
 	}
-	t, err := template.New("").Funcs(template.FuncMap{"stamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 UTC") }, "join": strings.Join}).ParseFS(templateFS, "templates/*.html")
+	t, err := template.New("").Funcs(template.FuncMap{"stamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") }, "join": strings.Join}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}

@@ -14,7 +14,7 @@
 <a href="/sendas"{{if eq .Nav "sendas"}} aria-current="page"{{end}}>Send-as</a>
 <a href="/log"{{if eq .Nav "log"}} aria-current="page"{{end}}>Log</a>
 </nav></header>
-<main>
+<main{{if eq .Nav "log"}} class="wide"{{end}}>
 <h1>{{.Title}}</h1>
 {{if .Flash}}<p class="flash {{if .IsErr}}error{{else}}ok{{end}}" role="status">{{.Flash}}</p>{{end}}
 {{end}}
