@@ -255,11 +255,11 @@ func TestChangeLogHasNoSecrets(t *testing.T) {
 	a := newAdmin(t, false)
 	const pw = "tr0ub4dor&3-horse"
 	steps := []func() (string, error){
-		func() (string, error) { return a.AddDomain("cli:kevin", "example.test") },
-		func() (string, error) { return a.AddMailbox("cli:kevin", "alice@example.test", "Alice", pw, false) },
-		func() (string, error) { return a.SetPassword("cli:kevin", "alice@example.test", pw+"2") },
+		func() (string, error) { return a.AddDomain("cli:alex", "example.test") },
+		func() (string, error) { return a.AddMailbox("cli:alex", "alice@example.test", "Alice", pw, false) },
+		func() (string, error) { return a.SetPassword("cli:alex", "alice@example.test", pw+"2") },
 		func() (string, error) {
-			return a.AddAlias("cli:kevin", "info@example.test", []string{"alice@example.test"})
+			return a.AddAlias("cli:alex", "info@example.test", []string{"alice@example.test"})
 		},
 	}
 	for _, s := range steps {

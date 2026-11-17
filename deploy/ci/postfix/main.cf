@@ -1,0 +1,100 @@
+# Reference postfix configuration for the CI stack. Names are example.test; a deployment
+# copies this and changes the identity, certificates, DNSBL list and relay settings that are
+# marked below. Everything lookup-related comes from mailctl's generations/current.
+
+compatibility_level = 3.10
+maillog_file = /dev/stdout
+
+# --- Identity -------------------------------------------------------------------------------
+myhostname = mail.example.test
+mydomain = example.test
+myorigin = $mydomain
+# Nothing is delivered locally: every hosted domain is virtual and handled over LMTP. Locally
+# generated notices (bounces, postmaster copies) need a postmaster@ alias in some hosted domain.
+mydestination =
+local_transport = error:local delivery is disabled
+alias_maps =
+alias_database =
+# IPv4 only because the compose network has no IPv6; relax it where the host does.
+inet_interfaces = all
+inet_protocols = ipv4
+
+# --- Trust ----------------------------------------------------------------------------------
+# Loopback only. The Docker network is NOT trusted: any container on it (and, with a published
+# port, any host that reaches it through NAT) would otherwise be allowed to relay.
+mynetworks = 127.0.0.0/8 [::1]/128
+smtpd_relay_restrictions = permit_sasl_authenticated, reject_unauth_destination
+# Refuse unknown local recipients during SMTP rather than accepting and bouncing, which would
+# turn this server into a backscatter source. Explicit although it is the default.
+smtpd_recipient_restrictions = reject_unlisted_recipient
+smtpd_sender_restrictions = reject_non_fqdn_sender
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+
+# --- Hosted domains and recipients (rendered by mailctl; texthash needs no postmap step) -----
+virtual_mailbox_domains = texthash:/data/mailstack/generations/current/postfix/domains
+virtual_mailbox_maps = texthash:/data/mailstack/generations/current/postfix/mailboxes
+virtual_alias_maps = texthash:/data/mailstack/generations/current/postfix/aliases
+smtpd_sender_login_maps = texthash:/data/mailstack/generations/current/postfix/sender_login
+recipient_delimiter = +
+
+# --- Delivery -------------------------------------------------------------------------------
+virtual_transport = lmtp:inet:dovecot:24
+# One recipient per LMTP transaction: delivery results are then per recipient, so one full
+# mailbox cannot defer or bounce mail that other recipients in the same message accepted.
+lmtp_destination_recipient_limit = 1
+message_size_limit = 104857600
+mailbox_size_limit = 0
+
+# --- SASL (dovecot is the only authority on passwords) --------------------------------------
+# AUTH is off here on purpose: port 25 never offers it. master.cf turns it on for 465 and 587.
+smtpd_sasl_auth_enable = no
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = inet:dovecot:12345
+smtpd_sasl_security_options = noanonymous
+smtpd_sasl_tls_security_options = noanonymous
+smtpd_sasl_local_domain =
+smtpd_tls_auth_only = yes
+
+# --- TLS ------------------------------------------------------------------------------------
+# Mounted at run time; the CI stack generates a throwaway pair, never committed.
+smtpd_tls_cert_file = /etc/ssl/mailstack/tls.crt
+smtpd_tls_key_file = /etc/ssl/mailstack/tls.key
+smtpd_tls_security_level = may
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_received_header = yes
+smtpd_tls_loglevel = 1
+smtp_tls_security_level = may
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+smtp_tls_loglevel = 1
+
+# --- Postscreen (port 25 only) --------------------------------------------------------------
+postscreen_access_list = permit_mynetworks
+postscreen_greet_action = enforce
+postscreen_dnsbl_action = enforce
+postscreen_dnsbl_threshold = 2
+# DEPLOYMENT: fill in with the DNSBL zones and weights the operator has a right to query
+# (for example "zone.example=2"). Empty here: CI has no DNS to ask, and an unreachable list
+# slows every new connection.
+postscreen_dnsbl_sites =
+
+# --- rspamd ---------------------------------------------------------------------------------
+smtpd_milters = inet:rspamd:11332
+milter_protocol = 6
+milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
+# tempfail, not accept: if rspamd is down the sender is told to retry later instead of mail
+# slipping into inboxes unscanned. Senders retry for days; an outage is minutes. Switch to
+# accept only if losing the filter must never delay mail.
+milter_default_action = tempfail
+
+# --- Outbound relay (DEPLOYMENT-SUPPLIED) ---------------------------------------------------
+# Left unset in CI so nothing leaves the stack. A deployment relaying through a provider sets
+# these. Do not set smtp_sasl_auth_soft_bounce: on a credential failure the default defers
+# the mail, so it waits in the queue and retries once the credentials are fixed, instead of
+# bouncing it to the sender.
+#relayhost = [smtp.relay.example.org]:587
+#smtp_sasl_auth_enable = yes
+#smtp_sasl_password_maps = texthash:/etc/postfix/relay_password
+#smtp_sasl_security_options = noanonymous
+#smtp_tls_security_level = encrypt

@@ -14,7 +14,7 @@ func TestCLI(t *testing.T) {
 	state, mail := t.TempDir(), t.TempDir()
 	vars := map[string]string{
 		"MAILCTL_STATE": state, "MAILCTL_MAIL_ROOT": mail, "MAILCTL_WATCHER": "off",
-		"SUDO_USER": "kevin", "USER": "root",
+		"SUDO_USER": "alex", "USER": "root",
 	}
 	getenv := func(k string) string { return vars[k] }
 	mailPath := filepath.Join(mail, "example.test", "alice")
@@ -82,7 +82,7 @@ func TestCLI(t *testing.T) {
 	out.Reset()
 	run([]string{"log"}, getenv, strings.NewReader(""), &out, &errOut)
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) < 5 || !strings.Contains(lines[0], "cli:kevin") || !strings.Contains(lines[0], "domain.add") {
+	if len(lines) < 5 || !strings.Contains(lines[0], "cli:alex") || !strings.Contains(lines[0], "domain.add") {
 		t.Errorf("log output:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "correct horse") || strings.Contains(out.String(), "$2y$") {
@@ -95,8 +95,8 @@ func TestActorFallback(t *testing.T) {
 		vars map[string]string
 		want string
 	}{
-		{map[string]string{"SUDO_USER": "kevin", "USER": "root"}, "cli:kevin"},
-		{map[string]string{"USER": "kevin"}, "cli:kevin"},
+		{map[string]string{"SUDO_USER": "alex", "USER": "root"}, "cli:alex"},
+		{map[string]string{"USER": "alex"}, "cli:alex"},
 		{map[string]string{}, "cli:unknown"},
 	}
 	for _, tc := range tests {

@@ -11,7 +11,7 @@ import (
 )
 
 // Every operation below takes an actor for the change log (for example
-// "cli:kevin" or an email), validates, applies atomically, and returns the
+// "cli:alex" or an email), validates, applies atomically, and returns the
 // text that follows "ok: ". On error nothing has changed.
 
 func (a *Admin) AddDomain(actor, domain string) (string, error) {

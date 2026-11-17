@@ -20,7 +20,7 @@ func TestImport(t *testing.T) {
 
 	snap := fixture()
 	snap.Mailboxes[0].Hash = "{BLF-CRYPT}$2y$10$verbatimhashvalue"
-	summary, err := a.Import("cli:kevin", snap)
+	summary, err := a.Import("cli:alex", snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestImport(t *testing.T) {
 			imports = append(imports, e)
 		}
 	}
-	if len(imports) != 1 || imports[0].Actor != "cli:kevin" || imports[0].Subject != "2 domains, 4 mailboxes, 2 aliases, 1 send-as grants" {
+	if len(imports) != 1 || imports[0].Actor != "cli:alex" || imports[0].Subject != "2 domains, 4 mailboxes, 2 aliases, 1 send-as grants" {
 		t.Errorf("import log entries: %+v", imports)
 	}
 	for _, e := range log {
@@ -55,7 +55,7 @@ func TestImport(t *testing.T) {
 		}
 	}
 
-	if _, err := a.Import("cli:kevin", snap); err == nil || !strings.Contains(err.Error(), "already holds") {
+	if _, err := a.Import("cli:alex", snap); err == nil || !strings.Contains(err.Error(), "already holds") {
 		t.Errorf("second import: %v", err)
 	}
 }
@@ -70,7 +70,7 @@ func TestImportInvalidChangesNothing(t *testing.T) {
 		Domains:   []string{"example.test"},
 		Mailboxes: []store.Mailbox{{Address: "Bad Name@example.test", Hash: "{BLF-CRYPT}$2y$10$x", State: store.Active}},
 	}
-	if _, err := a.Import("cli:kevin", snap); err == nil || !strings.Contains(err.Error(), `"Bad Name@example.test"`) {
+	if _, err := a.Import("cli:alex", snap); err == nil || !strings.Contains(err.Error(), `"Bad Name@example.test"`) {
 		t.Fatalf("err = %v", err)
 	}
 	if got, _ := a.Snapshot(); len(got.Domains)+len(got.Mailboxes) != 0 {
