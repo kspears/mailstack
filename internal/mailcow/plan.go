@@ -268,9 +268,12 @@ func attributes(raw string) map[string]string {
 	return out
 }
 
+// restricted reports a mailbox that mailcow bars from IMAP or SMTP, or routes
+// through its own relay. POP3 and ManageSieve are not offered here at all, so
+// mailcow switching them off for a mailbox restricts nothing that carries over.
 func restricted(raw string) bool {
 	attrs := attributes(raw)
-	for _, k := range []string{"imap_access", "smtp_access", "pop3_access", "sieve_access"} {
+	for _, k := range []string{"imap_access", "smtp_access"} {
 		if v, ok := attrs[k]; ok && v == "0" {
 			return true
 		}
