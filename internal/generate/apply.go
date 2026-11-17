@@ -181,7 +181,13 @@ func (a *Admin) Apply(actor string, publishEmpty bool) (string, error) {
 			return nil
 		}
 		have, exists, err := a.currentFiles()
-		if err != nil || !exists || have[FileDomains] == "" {
+		if !exists {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("the account store is empty and the files in use cannot be read, so it is not safe to replace them; pass --publish-empty if this is intended: %w", err)
+		}
+		if have[FileDomains] == "" {
 			return nil
 		}
 		return errors.New("the account store is empty but the files in use are not; refusing to remove every account. Restore store.db from backup, or pass --publish-empty if this is intended")

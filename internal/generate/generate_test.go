@@ -534,3 +534,25 @@ func TestStoreIsPrivate(t *testing.T) {
 		t.Errorf("watcher dir: %v %v", st, err)
 	}
 }
+
+func TestApplyRefusesEmptyStoreOverUnreadableCurrent(t *testing.T) {
+	cfg := Config{State: t.TempDir(), MailRoot: t.TempDir(), WatcherOff: true}
+	a, err := Open(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	link := filepath.Join(cfg.State, "generations", "current")
+	if err := os.Symlink("gone", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Apply("cli:alex", false); err == nil {
+		t.Fatal("apply published an empty store over an unreadable current")
+	}
+	if target, _ := os.Readlink(link); target != "gone" {
+		t.Fatalf("current moved to %q", target)
+	}
+	if _, err := a.Apply("cli:alex", true); err != nil {
+		t.Fatalf("apply --publish-empty: %v", err)
+	}
+}
