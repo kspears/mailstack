@@ -19,9 +19,9 @@ GENS=$STATE/generations
 WATCHER=$STATE/watcher
 STATUS=$WATCHER/status
 
-# Every file a complete generation must contain, and which of them are postfix lookup tables.
-MAPS="postfix/domains postfix/mailboxes postfix/aliases postfix/sender_login"
-FILES="dovecot/users $MAPS"
+# The one main.cf parameter that names the generation postfix reads. Validation points a
+# scratch copy of the config at the pending generation by overriding exactly this.
+PARAM=mailstack_generation
 
 log() { printf 'watcher: %s\n' "$*"; }
 
@@ -47,24 +47,33 @@ validate() {
 
 	[ -d "$dir" ] || { echo "generation $id does not exist"; return 1; }
 
-	for rel in $FILES; do
-		[ -f "$dir/$rel" ] && [ -r "$dir/$rel" ] || { echo "missing or unreadable $rel"; return 1; }
-	done
+	[ -f "$dir/dovecot/users" ] && [ -r "$dir/dovecot/users" ] || { echo "missing or unreadable dovecot/users"; return 1; }
 
-	# postmap prints parse problems (missing value, bad continuation) as warnings and still
-	# exits 0, so any stderr output is the failure signal. The probe key is irrelevant.
-	for rel in $MAPS; do
-		err=$(postmap -q "__watcher_probe__" "texthash:$dir/$rel" 2>&1 >/dev/null)
+	# Every regular file in postfix/ is a lookup table, whatever it is called. postmap prints
+	# parse problems (missing value, bad continuation) as warnings and still exits 0, so any
+	# stderr output is the failure signal. The probe key is irrelevant.
+	maps=0
+	for f in "$dir"/postfix/*; do
+		[ -f "$f" ] || continue
+		maps=$((maps + 1))
+		rel=postfix/${f##*/}
+		[ -r "$f" ] || { echo "unreadable $rel"; return 1; }
+		err=$(postmap -q "__watcher_probe__" "texthash:$f" 2>&1 >/dev/null)
 		[ -z "$err" ] || { echo "$rel: $err"; return 1; }
 	done
+	[ "$maps" -gt 0 ] || { echo "postfix/ holds no lookup tables"; return 1; }
 
-	# Check the real config with map paths pointed at this generation, in a scratch copy so the
+	# The config must name the generation through $PARAM and use it in its settings, or
+	# checking a copy that points at the pending one would silently check `current` instead.
+	[ -n "$(postconf -c "$CONF" -h "$PARAM" 2>/dev/null)" ] &&
+		postconf -c "$CONF" -n 2>/dev/null | grep -v "^$PARAM " | grep -q "$PARAM" ||
+		{ echo "$CONF/main.cf must set $PARAM and use it in its map settings"; return 1; }
+
+	# Check the real config with $PARAM pointed at this generation, in a scratch copy so the
 	# live config is never touched.
 	tmp=$(mktemp -d) || { echo "cannot create scratch directory"; return 1; }
 	cp -a "$CONF/." "$tmp/" || { rm -r "$tmp"; echo "cannot copy $CONF"; return 1; }
-	for f in main.cf master.cf; do
-		[ -f "$tmp/$f" ] && sed "s#generations/current/#generations/$id/#g" "$CONF/$f" >"$tmp/$f"
-	done
+	out=$(postconf -c "$tmp" -e "$PARAM=$dir" 2>&1) || { rm -r "$tmp"; echo "postconf: $out"; return 1; }
 	out=$(postfix -c "$tmp" check 2>&1)
 	rc=$?
 	rm -r "$tmp"

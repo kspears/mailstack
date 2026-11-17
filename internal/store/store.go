@@ -22,7 +22,8 @@ const (
 	Disabled    State = "disabled"
 )
 
-const hashPrefix = "{BLF-CRYPT}"
+// HashPrefix starts every password hash: dovecot's bcrypt scheme.
+const HashPrefix = "{BLF-CRYPT}"
 
 func ParseState(s string) (State, error) {
 	switch st := State(s); st {
@@ -64,13 +65,24 @@ type Snapshot struct {
 	Grants    []Grant
 }
 
+// HoldsAccounts reports whether the snapshot has any domain, mailbox or alias.
+func (s Snapshot) HoldsAccounts() bool {
+	return len(s.Domains)+len(s.Mailboxes)+len(s.Aliases) > 0
+}
+
+// ReplacedName is where a file or directory that is being replaced at path is
+// kept: path.replaced-<UTC timestamp>.
+func ReplacedName(path string, at time.Time) string {
+	return path + ".replaced-" + at.UTC().Format("20060102T150405Z")
+}
+
 // HashPassword returns a bcrypt hash in dovecot's {BLF-CRYPT} form with the $2y$ prefix.
 func HashPassword(password string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(password), 10)
 	if err != nil {
 		return "", fmt.Errorf("hash password: %w", err)
 	}
-	return hashPrefix + "$2y" + strings.TrimPrefix(string(h), "$2a"), nil
+	return HashPrefix + "$2y" + strings.TrimPrefix(string(h), "$2a"), nil
 }
 
 const schema = `
@@ -105,11 +117,29 @@ var migrations = []string{schema}
 
 type Store struct{ db *sql.DB }
 
-// Open opens or creates the database at path and migrates its schema.
+// Open opens the existing database at path and migrates its schema. It never
+// creates one: a missing file is an error, see Create.
 func Open(path string) (*Store, error) {
-	if err := private(path); err != nil {
+	if err := restrict(path); err != nil {
 		return nil, err
 	}
+	return open(path)
+}
+
+// Create makes a new empty database at path, which must not exist, with mode 0600:
+// the file holds every password hash.
+func Create(path string) (*Store, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	return open(path)
+}
+
+func open(path string) (*Store, error) {
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(10000)")
 	q.Add("_pragma", "foreign_keys(1)")
@@ -125,10 +155,9 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// private creates path with mode 0600 if missing and tightens it if it is looser:
-// the file holds every password hash.
-func private(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o600)
+// restrict tightens an existing database to mode 0600 if it is looser.
+func restrict(path string) error {
+	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
@@ -191,24 +220,21 @@ func (s *Store) Snapshot() (Snapshot, error) { return snapshot(s.db) }
 
 // Log returns the change log, oldest first.
 func (s *Store) Log() ([]LogEntry, error) {
-	rows, err := s.db.Query("SELECT time, actor, action, subject FROM log ORDER BY id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []LogEntry
-	for rows.Next() {
+	err := scan(s.db, "SELECT time, actor, action, subject FROM log ORDER BY id", func(r *sql.Rows) error {
 		var e LogEntry
 		var ts string
-		if err := rows.Scan(&ts, &e.Actor, &e.Action, &e.Subject); err != nil {
-			return nil, err
+		if err := r.Scan(&ts, &e.Actor, &e.Action, &e.Subject); err != nil {
+			return err
 		}
+		var err error
 		if e.Time, err = time.Parse(time.RFC3339, ts); err != nil {
-			return nil, err
+			return err
 		}
 		out = append(out, e)
-	}
-	return out, rows.Err()
+		return nil
+	})
+	return out, err
 }
 
 func snapshot(q querier) (Snapshot, error) {

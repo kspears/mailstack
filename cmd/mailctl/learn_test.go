@@ -15,7 +15,9 @@ type recorded struct {
 	path, password, body string
 }
 
-func learnRun(t *testing.T, handler http.HandlerFunc, args []string, stdin string, mod func(map[string]string)) (code int, stdout, stderr string, got *recorded) {
+// learnRun starts a fake rspamd controller and runs mailctl with the arguments args
+// builds from its URL and a password file that holds the controller password.
+func learnRun(t *testing.T, handler http.HandlerFunc, args func(url, pwFile string) []string, stdin string) (code int, stdout, stderr string, got *recorded) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -27,19 +29,21 @@ func learnRun(t *testing.T, handler http.HandlerFunc, args []string, stdin strin
 	if err := os.WriteFile(pwFile, []byte("s3cret-controller-pw\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	vars := map[string]string{"MAILCTL_RSPAMD_URL": srv.URL, "MAILCTL_RSPAMD_PASSWORD_FILE": pwFile}
-	if mod != nil {
-		mod(vars)
-	}
 	var out, errOut bytes.Buffer
-	code = run(args, func(k string) string { return vars[k] }, strings.NewReader(stdin), &out, &errOut)
+	code = run(args(srv.URL, pwFile), func(string) string { return "" }, strings.NewReader(stdin), &out, &errOut)
 	return code, out.String(), errOut.String(), got
+}
+
+func learnArgs(extra ...string) func(url, pwFile string) []string {
+	return func(url, pwFile string) []string {
+		return append([]string{"learn", "--controller", url, "--password-file", pwFile}, extra...)
+	}
 }
 
 func TestLearnPostsTheMessageWithThePasswordHeader(t *testing.T) {
 	for _, kind := range []string{"spam", "ham"} {
 		code, out, errOut, got := learnRun(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"success":true}`)) },
-			[]string{"learn", kind}, "Subject: hi\r\n\r\nbody", nil)
+			learnArgs(kind), "Subject: hi\r\n\r\nbody")
 		if code != 0 || got == nil || got.path != "/learn"+kind || got.password != "s3cret-controller-pw" || got.body != "Subject: hi\r\n\r\nbody" {
 			t.Errorf("%s: code %d stderr %q got %+v", kind, code, errOut, got)
 		}
@@ -71,7 +75,7 @@ func TestLearnOutcomes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, _, errOut, _ := learnRun(t, tc.h, []string{"learn", "spam"}, "msg", nil)
+			code, _, errOut, _ := learnRun(t, tc.h, learnArgs("spam"), "msg")
 			if tc.wantErr == "" && code != 0 {
 				t.Errorf("code %d: %s", code, errOut)
 			}
@@ -87,32 +91,59 @@ func TestLearnOutcomes(t *testing.T) {
 
 func TestLearnArgumentsAndSettings(t *testing.T) {
 	ok := func(w http.ResponseWriter, r *http.Request) {}
-	if code, _, errOut, got := learnRun(t, ok, []string{"learn"}, "msg", nil); code != 2 || got != nil || !strings.Contains(errOut, "usage: mailctl learn") {
+	if code, _, errOut, got := learnRun(t, ok, learnArgs(), "msg"); code != 2 || got != nil || !strings.Contains(errOut, "usage: mailctl learn") {
 		t.Errorf("no kind: code %d %q", code, errOut)
 	}
-	if code, _, _, _ := learnRun(t, ok, []string{"learn", "junk"}, "msg", nil); code != 2 {
+	if code, _, _, _ := learnRun(t, ok, learnArgs("junk"), "msg"); code != 2 {
 		t.Errorf("bad kind: code %d", code)
 	}
-	if code, _, errOut, got := learnRun(t, ok, []string{"learn", "spam"}, "", nil); code != 1 || got != nil || !strings.Contains(errOut, "stdin") {
+	if code, _, _, _ := learnRun(t, ok, learnArgs("spam", "ham"), "msg"); code != 2 {
+		t.Errorf("two kinds: code %d", code)
+	}
+	if code, _, errOut, got := learnRun(t, ok, learnArgs("spam"), ""); code != 1 || got != nil || !strings.Contains(errOut, "stdin") {
 		t.Errorf("empty message: code %d %q", code, errOut)
 	}
-	if code, _, errOut, _ := learnRun(t, ok, []string{"learn", "spam"}, "msg", func(v map[string]string) { delete(v, "MAILCTL_RSPAMD_PASSWORD_FILE") }); code != 1 || !strings.Contains(errOut, "password file (MAILCTL_RSPAMD_PASSWORD_FILE, default /run/secrets/rspamd-controller-password)") {
-		t.Errorf("no password file: code %d %q", code, errOut)
+	if code, _, errOut, got := learnRun(t, ok, func(url, _ string) []string { return []string{"learn", "--controller", url, "spam"} }, "msg"); code != 2 || got != nil || !strings.Contains(errOut, "usage: mailctl learn") {
+		t.Errorf("no --password-file: code %d %q", code, errOut)
 	}
-	if code, _, errOut, _ := learnRun(t, ok, []string{"learn", "spam"}, "msg", func(v map[string]string) { v["MAILCTL_RSPAMD_PASSWORD_FILE"] = "/nonexistent/pw" }); code != 1 || !strings.Contains(errOut, "password file") {
+	if code, _, errOut, got := learnRun(t, ok, func(_, pwFile string) []string { return []string{"learn", "--password-file", pwFile, "spam"} }, "msg"); code != 2 || got != nil || !strings.Contains(errOut, "usage: mailctl learn") {
+		t.Errorf("no --controller: code %d %q", code, errOut)
+	}
+	if code, _, errOut, got := learnRun(t, ok, func(url, _ string) []string {
+		return []string{"learn", "--controller", url, "--password-file", "/nonexistent/pw", "spam"}
+	}, "msg"); code != 1 || got != nil || !strings.Contains(errOut, "password file") {
 		t.Errorf("unreadable password file: code %d %q", code, errOut)
 	}
-	if code, _, errOut, _ := learnRun(t, ok, []string{"learn", "spam"}, "msg", func(v map[string]string) { v["MAILCTL_RSPAMD_URL"] = "http://127.0.0.1:1" }); code != 1 || !strings.HasPrefix(errOut, "error: ") {
+	if code, _, errOut, _ := learnRun(t, ok, func(_, pwFile string) []string {
+		return []string{"learn", "--controller", "http://127.0.0.1:1", "--password-file", pwFile, "spam"}
+	}, "msg"); code != 1 || !strings.HasPrefix(errOut, "error: ") {
 		t.Errorf("unreachable rspamd: code %d %q", code, errOut)
+	}
+	if code, _, _, got := learnRun(t, ok, func(url, pwFile string) []string {
+		return []string{"learn", "spam", "--controller", url + "/", "--password-file", pwFile}
+	}, "msg"); code != 0 || got == nil || got.path != "/learnspam" {
+		t.Errorf("flags after the kind, trailing slash: code %d %+v", code, got)
 	}
 }
 
 func TestLearnNeedsNoStateDirectory(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "never-created")
-	code, _, errOut, _ := learnRun(t, func(http.ResponseWriter, *http.Request) {}, []string{"learn", "ham"}, "msg",
-		func(v map[string]string) { v["MAILCTL_STATE"] = state })
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	pwFile := filepath.Join(t.TempDir(), "pw")
+	if err := os.WriteFile(pwFile, []byte("pw"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := run([]string{"learn", "--controller", srv.URL, "--password-file", pwFile, "ham"},
+		func(k string) string {
+			if k == "MAILCTL_STATE" {
+				return state
+			}
+			return ""
+		}, strings.NewReader("msg"), &out, &errOut)
 	if code != 0 {
-		t.Fatalf("code %d: %s", code, errOut)
+		t.Fatalf("code %d: %s", code, errOut.String())
 	}
 	if _, err := os.Stat(state); err == nil {
 		t.Error("learn created the state directory")

@@ -4,6 +4,7 @@ package web
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,7 +21,9 @@ import (
 	"time"
 
 	"github.com/kspears/mailstack/internal/access"
+	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/store"
+	"github.com/kspears/mailstack/internal/validate"
 )
 
 //go:embed templates/*.html
@@ -35,45 +38,27 @@ const (
 	csp         = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 )
 
-// Admin is the set of operations the UI needs; *generate.Admin satisfies it.
-type Admin interface {
-	Snapshot() (store.Snapshot, error)
-	Log() ([]store.LogEntry, error)
-	AddMailbox(actor, address, name, password string, adoptExisting bool) (string, error)
-	SetPassword(actor, address, password string) (string, error)
-	SetMailboxState(actor, address string, state store.State) (string, error)
-	RemoveMailbox(actor, address string) (string, error)
-	AddAlias(actor, address string, targets []string) (string, error)
-	RemoveAlias(actor, address string) (string, error)
-}
-
 // Config wires the server. Logf receives one line per request plus the reason
 // for each refused identity; it never receives query strings, bodies or tokens.
 type Config struct {
-	Admin      Admin
+	Admin      *generate.Admin
 	Identifier access.Identifier
 	Logf       func(format string, args ...any)
-	Now        func() time.Time
 }
 
 type server struct {
-	admin     Admin
+	admin     *generate.Admin
 	id        access.Identifier
 	logf      func(string, ...any)
-	now       func() time.Time
 	csrfKey   []byte
 	templates *template.Template
-	static    http.Handler
 }
 
 type ctxKey struct{}
 
 // New returns the handler for the whole UI. Every request is identified first.
 func New(cfg Config) (http.Handler, error) {
-	s := &server{admin: cfg.Admin, id: cfg.Identifier, logf: cfg.Logf, now: cfg.Now, csrfKey: make([]byte, 32)}
-	if s.now == nil {
-		s.now = time.Now
-	}
+	s := &server{admin: cfg.Admin, id: cfg.Identifier, logf: cfg.Logf, csrfKey: make([]byte, 32)}
 	if _, err := rand.Read(s.csrfKey); err != nil {
 		return nil, fmt.Errorf("generate CSRF key: %w", err)
 	}
@@ -86,23 +71,23 @@ func New(cfg Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.static = http.StripPrefix("/static/", http.FileServerFS(sub))
+	static := http.StripPrefix("/static/", http.FileServerFS(sub))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/mailboxes", http.StatusSeeOther) })
-	mux.HandleFunc("GET /static/", s.static.ServeHTTP)
-	mux.HandleFunc("GET /mailboxes", s.mailboxes)
+	mux.Handle("GET /static/", static)
+	mux.HandleFunc("GET /mailboxes", s.list("mailboxes", "Mailboxes", func(snap store.Snapshot) any { return snap.Mailboxes }))
 	mux.HandleFunc("GET /mailboxes/edit", s.mailboxEdit)
 	mux.HandleFunc("GET /mailboxes/remove", s.mailboxRemoveConfirm)
 	mux.HandleFunc("POST /mailboxes/add", s.mailboxAdd)
 	mux.HandleFunc("POST /mailboxes/password", s.mailboxPassword)
 	mux.HandleFunc("POST /mailboxes/state", s.mailboxState)
 	mux.HandleFunc("POST /mailboxes/remove", s.mailboxRemove)
-	mux.HandleFunc("GET /aliases", s.aliases)
+	mux.HandleFunc("GET /aliases", s.list("aliases", "Aliases", func(snap store.Snapshot) any { return snap.Aliases }))
 	mux.HandleFunc("POST /aliases/add", s.aliasAdd)
 	mux.HandleFunc("POST /aliases/remove", s.aliasRemove)
-	mux.HandleFunc("GET /domains", s.domains)
-	mux.HandleFunc("GET /sendas", s.sendAs)
+	mux.HandleFunc("GET /domains", s.list("domains", "Domains", func(snap store.Snapshot) any { return snap.Domains }))
+	mux.HandleFunc("GET /sendas", s.list("sendas", "Send-as grants", func(snap store.Snapshot) any { return snap.Grants }))
 	mux.HandleFunc("GET /log", s.changeLog)
 	return s.guard(mux), nil
 }
@@ -119,7 +104,7 @@ func (w *statusWriter) WriteHeader(code int) {
 
 func (s *server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := s.now()
+		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		h := sw.Header()
 		h.Set("Content-Security-Policy", csp)
@@ -136,7 +121,7 @@ func (s *server) guard(next http.Handler) http.Handler {
 			r.Body = http.MaxBytesReader(sw, r.Body, maxBody)
 			next.ServeHTTP(sw, r.WithContext(contextWithActor(r, actor)))
 		}
-		s.logf("%s %s %d %s %s", r.Method, r.URL.Path, sw.status, actor, s.now().Sub(start).Round(time.Millisecond))
+		s.logf("%s %s %d %s %s", r.Method, r.URL.Path, sw.status, actor, time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -151,10 +136,7 @@ func (s *server) checkPost(r *http.Request) error {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return fmt.Errorf("Sec-Fetch-Site is %q", site)
 	}
-	source := r.Header.Get("Origin")
-	if source == "" {
-		source = r.Header.Get("Referer")
-	}
+	source := cmp.Or(r.Header.Get("Origin"), r.Header.Get("Referer"))
 	u, err := url.Parse(source)
 	if source == "" || err != nil || u.Host != r.Host {
 		return fmt.Errorf("origin does not match host %q", r.Host)
@@ -219,13 +201,17 @@ func (s *server) fail(w http.ResponseWriter, what string, err error) {
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 
-func (s *server) mailboxes(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.admin.Snapshot()
-	if err != nil {
-		s.fail(w, "snapshot", err)
-		return
+// list serves one of the read-only account pages: the template is name, which is
+// also its nav entry, and pick chooses the rows.
+func (s *server) list(name, title string, pick func(store.Snapshot) any) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		snap, err := s.admin.Snapshot()
+		if err != nil {
+			s.fail(w, "snapshot", err)
+			return
+		}
+		s.render(w, r, name, name, title, pick(snap))
 	}
-	s.render(w, r, "mailboxes", "mailboxes", "Mailboxes", snap.Mailboxes)
 }
 
 func (s *server) mailbox(w http.ResponseWriter, r *http.Request) (store.Mailbox, bool) {
@@ -290,20 +276,7 @@ func (s *server) mailboxRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 func samePassword(r *http.Request) (string, error) {
-	pw := r.PostFormValue("password")
-	if pw != r.PostFormValue("password2") {
-		return "", fmt.Errorf("passwords do not match")
-	}
-	return pw, nil
-}
-
-func (s *server) aliases(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.admin.Snapshot()
-	if err != nil {
-		s.fail(w, "snapshot", err)
-		return
-	}
-	s.render(w, r, "aliases", "aliases", "Aliases", snap.Aliases)
+	return validate.SamePassword(r.PostFormValue("password"), r.PostFormValue("password2"))
 }
 
 func (s *server) aliasAdd(w http.ResponseWriter, r *http.Request) {
@@ -317,24 +290,6 @@ func (s *server) aliasRemove(w http.ResponseWriter, r *http.Request) {
 	s.do(w, r, "/aliases", func(actor string) (string, error) {
 		return s.admin.RemoveAlias(actor, r.PostFormValue("address"))
 	})
-}
-
-func (s *server) domains(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.admin.Snapshot()
-	if err != nil {
-		s.fail(w, "snapshot", err)
-		return
-	}
-	s.render(w, r, "domains", "domains", "Domains", snap.Domains)
-}
-
-func (s *server) sendAs(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.admin.Snapshot()
-	if err != nil {
-		s.fail(w, "snapshot", err)
-		return
-	}
-	s.render(w, r, "sendas", "sendas", "Send-as grants", snap.Grants)
 }
 
 func (s *server) changeLog(w http.ResponseWriter, r *http.Request) {

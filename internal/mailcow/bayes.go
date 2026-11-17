@@ -1,6 +1,9 @@
 package mailcow
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // DefaultBayesPatterns are the key patterns rspamd's statistics live under.
 var DefaultBayesPatterns = []string{"BAYES_*", "RS*", "learned_ids*"}
@@ -12,8 +15,9 @@ type PatternCount struct {
 }
 
 // CopyKeys copies every key matching the patterns from src to dst with its
-// TTL. With a nil dst it only counts. Nothing is deleted anywhere. A key that
-// matches several patterns is copied once and counted for the first.
+// TTL. With a nil dst it only counts what SCAN returns, without reading any key.
+// Nothing is deleted anywhere. A key that matches several patterns is copied
+// once and counted for the first.
 func CopyKeys(src, dst *Redis, patterns []string) ([]PatternCount, error) {
 	seen := map[string]bool{}
 	var out []PatternCount
@@ -25,19 +29,18 @@ func CopyKeys(src, dst *Redis, patterns []string) ([]PatternCount, error) {
 			if err != nil {
 				return out, err
 			}
+			var fresh []string
 			for _, key := range keys {
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				copied, err := copyKey(src, dst, key)
-				if err != nil {
-					return out, fmt.Errorf("copy key %s: %w", key, err)
-				}
-				if copied {
-					count.Keys++
+				if !seen[key] {
+					seen[key] = true
+					fresh = append(fresh, key)
 				}
 			}
+			n, err := copyPage(src, dst, fresh)
+			if err != nil {
+				return out, fmt.Errorf("copy keys matching %s: %w", pattern, err)
+			}
+			count.Keys += n
 			if cursor = next; cursor == "0" {
 				break
 			}
@@ -47,17 +50,38 @@ func CopyKeys(src, dst *Redis, patterns []string) ([]PatternCount, error) {
 	return out, nil
 }
 
-func copyKey(src, dst *Redis, key string) (bool, error) {
-	payload, ok, err := src.Dump(key)
-	if err != nil || !ok {
-		return false, err
+// copyPage copies one SCAN page in two round trips: DUMP and PTTL for every key
+// from src, then RESTORE for every key that still existed to dst. It returns how
+// many keys were copied; with a nil dst, how many there are.
+func copyPage(src, dst *Redis, keys []string) (int, error) {
+	if dst == nil || len(keys) == 0 {
+		return len(keys), nil
 	}
-	if dst == nil {
-		return true, nil
+	reads := make([][]string, 0, 2*len(keys))
+	for _, key := range keys {
+		reads = append(reads, []string{"DUMP", key}, []string{"PTTL", key})
 	}
-	ttl, err := src.PTTL(key)
+	replies, err := src.Pipeline(reads)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	return true, dst.Restore(key, ttl, payload)
+	var writes [][]string
+	for i, key := range keys {
+		payload, ok := replies[2*i].(string)
+		if !ok {
+			continue // deleted or expired since SCAN
+		}
+		ttl, _ := replies[2*i+1].(int64)
+		if ttl == -2 {
+			continue
+		}
+		writes = append(writes, []string{"RESTORE", key, strconv.FormatInt(max(ttl, 0), 10), payload, "REPLACE"})
+	}
+	if len(writes) == 0 {
+		return 0, nil
+	}
+	if _, err := dst.Pipeline(writes); err != nil {
+		return 0, err
+	}
+	return len(writes), nil
 }

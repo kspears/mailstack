@@ -25,18 +25,18 @@ const (
 
 // countQueries fill Data.Counts. A table missing from the schema counts as zero.
 var countQueries = []struct{ item, table, query string }{
-	{"alias-domains", "alias_domain", `SELECT COUNT(*) FROM alias_domain`},
-	{"bcc-maps", "bcc_maps", `SELECT COUNT(*) FROM bcc_maps`},
-	{"recipient-maps", "recipient_maps", `SELECT COUNT(*) FROM recipient_maps`},
-	{"transport-maps", "transports", `SELECT COUNT(*) FROM transports`},
-	{"temporary-aliases", "spamalias", `SELECT COUNT(*) FROM spamalias`},
-	{"sync-jobs", "imapsync", `SELECT COUNT(*) FROM imapsync`},
-	{"forwarding-hosts", "forwarding_hosts", `SELECT COUNT(*) FROM forwarding_hosts`},
-	{"domain-footers", "domain_wide_footer", `SELECT COUNT(*) FROM domain_wide_footer`},
-	{"sieve-filters", "sieve_filters", `SELECT COUNT(*) FROM sieve_filters`},
-	{"spam-settings", "filterconf", `SELECT COUNT(*) FROM filterconf`},
-	{"app-passwords", "app_passwd", `SELECT COUNT(*) FROM app_passwd WHERE active = 1`},
-	{"tfa", "tfa", `SELECT COUNT(*) FROM tfa WHERE username IN (SELECT username FROM mailbox)`},
+	{itemAliasDomains, "alias_domain", `SELECT COUNT(*) FROM alias_domain`},
+	{itemBCCMaps, "bcc_maps", `SELECT COUNT(*) FROM bcc_maps`},
+	{itemRecipientMaps, "recipient_maps", `SELECT COUNT(*) FROM recipient_maps`},
+	{itemTransportMaps, "transports", `SELECT COUNT(*) FROM transports`},
+	{itemTemporaryAliases, "spamalias", `SELECT COUNT(*) FROM spamalias`},
+	{itemSyncJobs, "imapsync", `SELECT COUNT(*) FROM imapsync`},
+	{itemForwardingHosts, "forwarding_hosts", `SELECT COUNT(*) FROM forwarding_hosts`},
+	{itemDomainFooters, "domain_wide_footer", `SELECT COUNT(*) FROM domain_wide_footer`},
+	{itemSieveFilters, "sieve_filters", `SELECT COUNT(*) FROM sieve_filters`},
+	{itemSpamSettings, "filterconf", `SELECT COUNT(*) FROM filterconf`},
+	{itemAppPasswords, "app_passwd", `SELECT COUNT(*) FROM app_passwd WHERE active = 1`},
+	{itemTFA, "tfa", `SELECT COUNT(*) FROM tfa WHERE username IN (SELECT username FROM mailbox)`},
 }
 
 const (
@@ -164,7 +164,7 @@ func (l Live) readRedis(d *Data) error {
 	if d.DKIMSelectors, err = l.Redis.HGetAll(redisDKIMSelectors); err != nil {
 		return fmt.Errorf("read %s from mailcow's redis: %w", redisDKIMSelectors, err)
 	}
-	if d.Counts["rate-limits"], err = l.Redis.HLen(redisRateLimits); err != nil {
+	if d.Counts[itemRateLimits], err = l.Redis.HLen(redisRateLimits); err != nil {
 		return fmt.Errorf("read %s from mailcow's redis: %w", redisRateLimits, err)
 	}
 	return nil

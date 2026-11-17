@@ -6,14 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path/filepath"
+	"maps"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/kspears/mailstack/internal/store"
-	"github.com/kspears/mailstack/internal/validate"
 )
 
 const (
@@ -29,8 +27,10 @@ var fileNames = []string{FileUsers, FileDomains, FileMailboxes, FileAliases, Fil
 // Files maps a path relative to a generation directory to its content.
 type Files map[string]string
 
-// Render produces every generated file for snap. snap must be consistent.
-func Render(snap store.Snapshot, cfg Config) Files {
+// Render produces every generated file for snap, from the store alone. snap must be
+// consistent. dovecot/users leaves uid, gid and home empty: dovecot's own settings
+// supply them.
+func Render(snap store.Snapshot) Files {
 	var users, domains, mailboxes, aliases []string
 	for _, d := range snap.Domains {
 		domains = append(domains, d+" OK")
@@ -39,8 +39,7 @@ func Render(snap store.Snapshot, cfg Config) Files {
 		if m.State == store.Disabled {
 			continue
 		}
-		local, domain := validate.Split(m.Address)
-		line := fmt.Sprintf("%s:%s:%d:%d::%s::", m.Address, m.Hash, cfg.UID, cfg.GID, filepath.Join(cfg.MailRoot, domain, local))
+		line := m.Address + ":" + m.Hash + "::::::"
 		if m.State == store.ReceiveOnly {
 			line += "nologin=y"
 		}
@@ -91,19 +90,9 @@ func senderLogin(snap store.Snapshot) []string {
 			allow(a.Address, m)
 		}
 	}
-	senders := make([]string, 0, len(logins))
-	for s := range logins {
-		senders = append(senders, s)
-	}
-	sort.Strings(senders)
-	lines := make([]string, 0, len(senders))
-	for _, s := range senders {
-		l := make([]string, 0, len(logins[s]))
-		for login := range logins[s] {
-			l = append(l, login)
-		}
-		sort.Strings(l)
-		lines = append(lines, s+" "+strings.Join(l, ","))
+	var lines []string
+	for _, s := range slices.Sorted(maps.Keys(logins)) {
+		lines = append(lines, s+" "+strings.Join(slices.Sorted(maps.Keys(logins[s])), ","))
 	}
 	return lines
 }
@@ -126,7 +115,7 @@ func deliversTo(alias string, targets map[string][]string, active, seen map[stri
 }
 
 func join(lines []string) string {
-	sort.Strings(lines)
+	slices.Sort(lines)
 	if len(lines) == 0 {
 		return ""
 	}

@@ -34,7 +34,7 @@ lock                        one lock for every change, CLI and UI alike
 dkim/                       DKIM private keys from the mailcow import
 watcher/status              written by the postfix watcher: which set it last checked
 generations/<id>/           one complete set of generated files
-  dovecot/users             passwd-file: address, hash, uid, gid, home
+  dovecot/users             passwd-file: address and hash; uid, gid and home are empty
   postfix/domains           texthash: hosted domains
   postfix/mailboxes         texthash: deliverable addresses
   postfix/aliases           texthash: alias -> targets
@@ -42,6 +42,10 @@ generations/<id>/           one complete set of generated files
 generations/current         relative symlink: the set the daemons use
 generations/pending         relative symlink: a set waiting for postfix to accept it
 ```
+
+`dovecot/users` carries no uid, gid or home, so the generated files depend on the store alone.
+Dovecot's `mail_uid`, `mail_gid` and `mail_home` settings own those, and `MAILCTL_MAIL_ROOT` is
+never rendered into a file.
 
 Postfix faces the internet, so it mounts only `generations/` (read-only) and `watcher/`
 (read-write); dovecot mounts only `generations/` (read-only). Neither sees `store.db` or
@@ -54,7 +58,9 @@ before a generation is installed, and the directories after each rename.
 2. Check that `generations/current` is what the store renders; if not, stop (below).
 3. Render a whole new generation directory and check it.
 4. Point `pending` at it. The postfix watcher sees `pending` differs from what it last
-   applied, runs `postfix check` against it, reloads, and writes `watcher/status`.
+   applied, runs `postfix check` against a scratch copy of the config in which the one
+   parameter `mailstack_generation` names that generation, and writes `watcher/status`. When
+   `current` moves it reloads postfix.
 5. On success, move `current` to the new generation and commit. On failure or timeout,
    drop `pending`, roll back, and print `error: ...`. Nothing changes.
 
@@ -63,6 +69,13 @@ watcher writes it after checking the generation `pending` points at; `mailctl` i
 `status` that names a different generation. Generation ids look like
 `20261117T120000.000000Z-1a2b3c4d` (UTC time, then a content hash). The last 10 are kept.
 The postfix entrypoint restarts the watcher if it exits.
+
+The watcher requires `dovecot/users` and at least one file in `postfix/`, and checks every
+regular file in `postfix/` as a `texthash` table. Postfix's `main.cf` must define
+`mailstack_generation` (the reference one sets it to `/data/mailstack/generations/current`) and
+write every generated map relative to it, as `texthash:$mailstack_generation/postfix/aliases`.
+A config that does not is a failed generation (`error ... must set mailstack_generation ...`):
+the watcher never validates `current` in place of the pending one.
 
 ### When the store and the files in use disagree
 
@@ -77,26 +90,21 @@ Without that, a lost, emptied or replaced `store.db` would publish an empty acco
 next change and remove every account from the daemons. Check with `mailctl mailbox list`, then
 run `mailctl apply`, which renders the store as it is and applies it. If the store has no
 domains but `current` lists some, `apply` refuses too, unless you pass `--publish-empty`.
-`mailctl mailbox list` and `mailctl log` do not create a missing `store.db` when `current`
-exists; they say `account store <path> is missing but generated files exist; restore it from
-backup`. Before the first generation exists, a missing store is created as usual.
+
+One rule covers a lost store: no command creates a missing `store.db` while `generations/current`
+exists. They fail with `account store <path> is missing but generated files exist; restore it
+from backup`, and leave no file behind. Only `apply --publish-empty` and
+`import-mailcow --overwrite` start over on purpose. Before the first generation exists, a missing
+store is created as usual.
 
 ## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAILCTL_STATE` | `/data/mailstack` | state directory |
-| `MAILCTL_MAIL_ROOT` | `/var/vmail` | mail lives in `<root>/<domain>/<localpart>` |
-| `MAILCTL_MAIL_UID`, `MAILCTL_MAIL_GID` | `5000` | owner written to `dovecot/users` |
+| `MAILCTL_MAIL_ROOT` | `/var/vmail` | mail lives in `<root>/<domain>/<localpart>`; used to find existing mail and in messages, never written to a generated file |
 | `MAILCTL_APPLY_TIMEOUT` | `30s` | how long to wait for the watcher's `status` |
 | `MAILCTL_WATCHER` | unset | `off` skips the wait (tests, first bootstrap) |
-| `MAILCTL_RSPAMD_URL` | `http://rspamd:11334` | rspamd controller, for `mailctl learn` |
-| `MAILCTL_RSPAMD_PASSWORD_FILE` | `/run/secrets/rspamd-controller-password` | file holding the controller password, for `mailctl learn` |
-
-`MAILCTL_MAIL_ROOT`, `MAILCTL_MAIL_UID` and `MAILCTL_MAIL_GID` end up in `dovecot/users` and
-in the "mail already exists" check, so they must be identical for every process that runs
-`mailctl`: the CLI wrapper, `mailctl serve` and the import. Different values make the next
-change render different files and, since the check above compares them, refuse to run.
 
 The change log names the operator from `SUDO_USER`, then `USER`. A host wrapper that runs
 `docker compose run admin ...` must pass it in (`-e SUDO_USER`), or every CLI change is
@@ -104,18 +112,23 @@ logged as the container's user.
 
 ## Junk training
 
-`mailctl learn spam|ham` reads one message on stdin and posts it to rspamd's controller
-(`/learnspam` or `/learnham`) with the `Password` header taken from the password file, never
-from a command line. It needs no state directory and never opens the store. It exits 0 when
+```
+mailctl learn --controller <url> --password-file <path> spam|ham
+```
+
+Reads one message on stdin and posts it to rspamd's controller at `<url>` (`/learnspam` or
+`/learnham`) with the `Password` header taken from the password file, never from a command
+line. Both flags are required. It needs no state directory and never opens the store. It exits 0 when
 rspamd learns the message and when rspamd declines it as already learned or too small to learn
 from (HTTP 208, or a 4xx whose error says so); anything else is `error: ...` and exit 1.
 
 The reference stack wires it to IMAPSieve: moving a message into Junk pipes it to
-`mailctl learn spam`, moving it out (except into Trash) pipes it to `mailctl learn ham`
+`mailctl learn ... spam`, moving it out (except into Trash) pipes it to `mailctl learn ... ham`,
+with the controller URL and password file path written in the two Sieve scripts
 (`deploy/ci/dovecot/`). The dovecot image has no shell tools, so the static binary is the pipe
 program: a one-shot `learn-bin` service runs `mailctl install-self /sieve/bin` into a volume
-dovecot mounts read-only. Sieve starts the program with an empty environment, which is why the
-two settings above have defaults, and the Go runtime needs `service imap { vsz_limit = 2G }`.
+dovecot mounts read-only. Sieve starts the program with an empty environment, which is why the settings are arguments,
+and the Go runtime needs `service imap { vsz_limit = 2G }`.
 The controller needs `enable_password`, set outside the repository; it listens on the compose
 network only.
 
@@ -208,7 +221,8 @@ any change, so a bad address or alias surfaces before anything is written); then
 store is loaded in a single transaction that also applies one generation, so on any failure
 the store and `current` are exactly as they were. The files in use are not required to match
 the store (that is what an import replaces). It refuses to run if `<state>/store.db` already
-holds a domain, mailbox or alias, unless `--overwrite`: then a consistent copy of the database
+holds a domain, mailbox or alias, unless `--overwrite` (the check is made inside that
+transaction, after the reads and the plan, so a dry run does not make it): then a consistent copy of the database
 (taken with SQLite's `VACUUM INTO`) is first written to `store.db.replaced-<timestamp>`, `store.db`
 itself is never renamed or deleted, and the copy is removed again if the import fails. DKIM keys
 come next: they are staged beside the key directory, and with `--overwrite` an existing directory

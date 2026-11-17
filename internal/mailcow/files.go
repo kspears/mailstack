@@ -9,13 +9,6 @@ import (
 	"strings"
 )
 
-// Items that live in files on disk rather than in mailcow's database.
-const (
-	itemSieveScripts    = "sieve-scripts"
-	itemSharedFolderACL = "shared-folder-acls"
-	itemRspamdMaps      = "global-rspamd-maps"
-)
-
 // readFiles fills the counts of the three file-backed stop items. An item whose
 // directory is not set or cannot be read goes in d.Unchecked with the reason
 // instead: a count of zero must only ever mean "looked, found nothing".
@@ -33,9 +26,9 @@ func (l Live) readFiles(d *Data) {
 		}
 		d.Counts[item] = n
 	}
-	check(itemSieveScripts, l.MailRoot, "MAILCOW_VMAIL_ROOT (or MAILCTL_MAIL_ROOT)", CountSieveScripts)
-	check(itemSharedFolderACL, l.MailRoot, "MAILCOW_VMAIL_ROOT (or MAILCTL_MAIL_ROOT)", CountFolderACLs)
-	check(itemRspamdMaps, l.RspamdCustomDir, "MAILCOW_RSPAMD_CUSTOM_DIR", CountRspamdMapLines)
+	check(itemSieveScripts, l.MailRoot, "MAILCOW_VMAIL_ROOT (or MAILCTL_MAIL_ROOT)", countSieveScripts)
+	check(itemSharedFolderACLs, l.MailRoot, "MAILCOW_VMAIL_ROOT (or MAILCTL_MAIL_ROOT)", countFolderACLs)
+	check(itemRspamdMaps, l.RspamdCustomDir, "MAILCOW_RSPAMD_CUSTOM_DIR", countRspamdMapLines)
 }
 
 // mailboxHomes lists <root>/<domain>/<user> directories. The top-level "sieve"
@@ -63,10 +56,10 @@ func mailboxHomes(root string) ([]string, error) {
 	return homes, nil
 }
 
-// CountSieveScripts counts user Sieve scripts under a mail root: files matching
+// countSieveScripts counts user Sieve scripts under a mail root: files matching
 // <root>/sieve/*.sieve except mailcow's two global scripts, plus, in each mailbox
 // home, every *.sieve file and a non-empty sieve/ directory.
-func CountSieveScripts(root string) (int, error) {
+func countSieveScripts(root string) (int, error) {
 	homes, err := mailboxHomes(root)
 	if err != nil {
 		return 0, err
@@ -105,10 +98,10 @@ func CountSieveScripts(root string) (int, error) {
 	return n, nil
 }
 
-// CountFolderACLs counts non-empty dovecot-acl files in any mailbox's Maildir and
+// countFolderACLs counts non-empty dovecot-acl files in any mailbox's Maildir and
 // its folder directories, plus a non-empty <root>/shared-mailboxes.db. It walks
 // directories only and never descends into cur, new or tmp.
-func CountFolderACLs(root string) (int, error) {
+func countFolderACLs(root string) (int, error) {
 	homes, err := mailboxHomes(root)
 	if err != nil {
 		return 0, err
@@ -146,9 +139,9 @@ func CountFolderACLs(root string) (int, error) {
 	return n, nil
 }
 
-// CountRspamdMapLines counts non-blank, non-comment lines across the *.map files
+// countRspamdMapLines counts non-blank, non-comment lines across the *.map files
 // directly inside dir.
-func CountRspamdMapLines(dir string) (int, error) {
+func countRspamdMapLines(dir string) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, err

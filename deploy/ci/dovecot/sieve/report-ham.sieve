@@ -8,4 +8,4 @@ if environment :matches "imap.mailbox" "*" {
 if string "${mailbox}" "Trash" {
   stop;
 }
-pipe :copy "mailctl" ["learn", "ham"];
+pipe :copy "mailctl" ["learn", "--controller", "http://rspamd:11334", "--password-file", "/run/secrets/rspamd-controller-password", "ham"];

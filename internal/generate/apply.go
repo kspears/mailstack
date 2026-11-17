@@ -1,12 +1,11 @@
 package generate
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +20,6 @@ const keepGenerations = 10
 type Config struct {
 	State      string
 	MailRoot   string
-	UID, GID   int
 	WatcherOff bool
 	Timeout    time.Duration
 	Poll       time.Duration
@@ -31,26 +29,12 @@ type Config struct {
 // ConfigFromEnv reads MAILCTL_* settings through getenv.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
-		State:      orDefault(getenv("MAILCTL_STATE"), "/data/mailstack"),
-		MailRoot:   orDefault(getenv("MAILCTL_MAIL_ROOT"), "/var/vmail"),
-		UID:        5000,
-		GID:        5000,
+		State:      cmp.Or(getenv("MAILCTL_STATE"), "/data/mailstack"),
+		MailRoot:   cmp.Or(getenv("MAILCTL_MAIL_ROOT"), "/var/vmail"),
 		WatcherOff: getenv("MAILCTL_WATCHER") == "off",
 		Timeout:    30 * time.Second,
 		Poll:       100 * time.Millisecond,
 		Now:        time.Now,
-	}
-	for _, v := range []struct {
-		name string
-		dst  *int
-	}{{"MAILCTL_MAIL_UID", &cfg.UID}, {"MAILCTL_MAIL_GID", &cfg.GID}} {
-		if s := getenv(v.name); s != "" {
-			n, err := strconv.Atoi(s)
-			if err != nil || n < 0 {
-				return cfg, fmt.Errorf("%s=%q is not a valid id", v.name, s)
-			}
-			*v.dst = n
-		}
 	}
 	if s := getenv("MAILCTL_APPLY_TIMEOUT"); s != "" {
 		d, err := time.ParseDuration(s)
@@ -62,32 +46,22 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
-func orDefault(s, def string) string {
-	if s == "" {
-		return def
-	}
-	return s
-}
+// StorePath is the account store's file.
+func StorePath(cfg Config) string { return filepath.Join(cfg.State, "store.db") }
 
 // Admin owns the store and applies every change to it.
 type Admin struct {
-	cfg       Config
-	st        *store.Store
-	gens      string
-	storePath string
+	cfg  Config
+	st   *store.Store
+	gens string
 }
 
-// Open creates the state directory if needed and opens the store. It refuses to
-// create a store while generated files exist: a missing store.db next to a
-// populated generations/current means the store was lost, not that this is a
-// fresh install.
-func Open(cfg Config) (*Admin, error) { return open(cfg, false) }
-
-// OpenForResync is Open for the two commands that may start from a missing
-// store: apply and the mailcow import.
-func OpenForResync(cfg Config) (*Admin, error) { return open(cfg, true) }
-
-func open(cfg Config, createStore bool) (*Admin, error) {
+// Open creates the state directory if needed and opens the store. A missing
+// store.db is created only on a fresh install, when generations/current does not
+// exist yet. Next to a generation in use it means the store was lost, so Open
+// fails unless allowCreate is set: only `apply --publish-empty` and
+// `import-mailcow --overwrite` start over on purpose.
+func Open(cfg Config, allowCreate bool) (*Admin, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -101,17 +75,21 @@ func open(cfg Config, createStore bool) (*Admin, error) {
 	if err := makeDir(watcherDir(cfg)); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(cfg.State, "store.db")
-	if !createStore {
-		if err := refuseLostStore(path, gens); err != nil {
-			return nil, err
-		}
-	}
-	st, err := store.Open(path)
+	st, err := openStore(StorePath(cfg), gens, allowCreate)
 	if err != nil {
 		return nil, err
 	}
-	return &Admin{cfg: cfg, st: st, gens: gens, storePath: path}, nil
+	return &Admin{cfg: cfg, st: st, gens: gens}, nil
+}
+
+func openStore(path, gens string, allowCreate bool) (*store.Store, error) {
+	if _, err := os.Stat(path); err == nil {
+		return store.Open(path)
+	}
+	if _, err := os.Lstat(filepath.Join(gens, "current")); err == nil && !allowCreate {
+		return nil, fmt.Errorf("account store %s is missing but generated files exist; restore it from backup", path)
+	}
+	return store.Create(path)
 }
 
 // watcherDir is the only state directory the internet-facing postfix container may write.
@@ -122,16 +100,6 @@ func makeDir(dir string) error {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
 	return os.Chmod(dir, 0o755)
-}
-
-func refuseLostStore(path, gens string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
-	if _, err := os.Lstat(filepath.Join(gens, "current")); err != nil {
-		return nil
-	}
-	return fmt.Errorf("account store %s is missing but generated files exist; restore it from backup", path)
 }
 
 func (a *Admin) Close() error { return a.st.Close() }
@@ -155,6 +123,9 @@ func (a *Admin) change(actor string, fn func(tx *store.Tx, snap store.Snapshot) 
 	return a.run(actor, a.requireCurrentMatches, fn)
 }
 
+// run is the one pipeline every change takes, under the lock and in one store
+// transaction: guard looks at the store as it was, fn changes it, then the result
+// is validated, applied as one generation and committed.
 func (a *Admin) run(actor string, guard func(store.Snapshot) error, fn func(tx *store.Tx, snap store.Snapshot) (change, error)) (string, error) {
 	unlock, err := a.lock()
 	if err != nil {
@@ -177,11 +148,6 @@ func (a *Admin) run(actor string, guard func(store.Snapshot) error, fn func(tx *
 	if err != nil {
 		return "", err
 	}
-	return a.finish(tx, actor, c)
-}
-
-// finish validates what the transaction holds, applies it as one generation and commits.
-func (a *Admin) finish(tx *store.Tx, actor string, c change) (string, error) {
 	after, err := tx.Snapshot()
 	if err != nil {
 		return "", err
@@ -192,7 +158,7 @@ func (a *Admin) finish(tx *store.Tx, actor string, c change) (string, error) {
 	if err := tx.Log(a.cfg.Now(), actor, c.action, c.subject); err != nil {
 		return "", err
 	}
-	id, err := a.deploy(Render(after, a.cfg))
+	id, err := a.deploy(Render(after))
 	if err != nil {
 		return "", err
 	}
@@ -259,7 +225,7 @@ func (a *Admin) requireCurrentMatches(snap store.Snapshot) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", msg, err)
 	}
-	if !have.Equal(Render(snap, a.cfg)) {
+	if !have.Equal(Render(snap)) {
 		return errors.New(msg)
 	}
 	return nil
@@ -274,7 +240,7 @@ func (a *Admin) deploy(files Files) (string, error) {
 		os.RemoveAll(tmp)
 		return "", err
 	}
-	if err := SelfCheck(tmp); err != nil {
+	if err := SelfCheck(tmp, files); err != nil {
 		os.RemoveAll(tmp)
 		return "", err
 	}
@@ -345,7 +311,6 @@ func (a *Admin) prune() {
 			ids = append(ids, e.Name())
 		}
 	}
-	sort.Strings(ids)
 	current, _ := os.Readlink(filepath.Join(a.gens, "current"))
 	for len(ids) > keepGenerations {
 		if ids[0] != current {

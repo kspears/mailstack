@@ -1,4 +1,4 @@
 require ["vnd.dovecot.pipe", "copy", "imapsieve"];
 
 # Runs when a user moves or copies a message into Junk: train rspamd on it as spam.
-pipe :copy "mailctl" ["learn", "spam"];
+pipe :copy "mailctl" ["learn", "--controller", "http://rspamd:11334", "--password-file", "/run/secrets/rspamd-controller-password", "spam"];

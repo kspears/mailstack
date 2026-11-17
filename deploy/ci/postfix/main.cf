@@ -32,10 +32,13 @@ smtpd_helo_required = yes
 disable_vrfy_command = yes
 
 # --- Hosted domains and recipients (rendered by mailctl; texthash needs no postmap step) -----
-virtual_mailbox_domains = texthash:/data/mailstack/generations/current/postfix/domains
-virtual_mailbox_maps = texthash:/data/mailstack/generations/current/postfix/mailboxes
-virtual_alias_maps = texthash:/data/mailstack/generations/current/postfix/aliases
-smtpd_sender_login_maps = texthash:/data/mailstack/generations/current/postfix/sender_login
+# The generation in use. The watcher checks a pending generation by pointing this one
+# parameter at it, so every map below must be written relative to it.
+mailstack_generation = /data/mailstack/generations/current
+virtual_mailbox_domains = texthash:$mailstack_generation/postfix/domains
+virtual_mailbox_maps = texthash:$mailstack_generation/postfix/mailboxes
+virtual_alias_maps = texthash:$mailstack_generation/postfix/aliases
+smtpd_sender_login_maps = texthash:$mailstack_generation/postfix/sender_login
 recipient_delimiter = +
 
 # --- Delivery -------------------------------------------------------------------------------

@@ -3,9 +3,11 @@
 package validate
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/kspears/mailstack/internal/store"
 )
@@ -95,28 +97,40 @@ func Split(address string) (local, domain string) {
 	return
 }
 
-// Consistency checks a whole snapshot and returns the first problem found.
+// SamePassword returns the password when both entries are equal.
+func SamePassword(a, b string) (string, error) {
+	if a != b {
+		return "", errors.New("passwords do not match")
+	}
+	return a, nil
+}
+
+// Consistency checks a whole snapshot and returns the first problem found. It is
+// the one definition of a valid store: every row the daemons' files are rendered
+// from must pass it, however the row got there.
 func Consistency(s store.Snapshot) error {
 	hosted := map[string]bool{}
 	for _, d := range s.Domains {
+		if got, err := Domain(d); err != nil {
+			return err
+		} else if got != d {
+			return fmt.Errorf("domain %q is not normalised; it should be %q", d, got)
+		}
 		hosted[d] = true
 	}
 	mailboxes := map[string]store.Mailbox{}
 	for _, m := range s.Mailboxes {
-		if err := inHostedDomain(m.Address, hosted); err != nil {
+		if err := hostedAddress(m.Address, hosted); err != nil {
 			return err
 		}
-		if _, err := HostedName(m.Address); err != nil {
+		if err := mailboxFields(m); err != nil {
 			return err
 		}
 		mailboxes[m.Address] = m
 	}
 	aliases := map[string][]string{}
 	for _, a := range s.Aliases {
-		if err := inHostedDomain(a.Address, hosted); err != nil {
-			return err
-		}
-		if _, err := HostedName(a.Address); err != nil {
+		if err := hostedAddress(a.Address, hosted); err != nil {
 			return err
 		}
 		if _, dup := mailboxes[a.Address]; dup {
@@ -152,6 +166,34 @@ func Consistency(s store.Snapshot) error {
 		if err := inHostedDomain(g.Address, hosted); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// hostedAddress checks the address of a mailbox or alias: a normalised hosted
+// name in a hosted domain.
+func hostedAddress(address string, hosted map[string]bool) error {
+	got, err := HostedName(address)
+	if err != nil {
+		return err
+	}
+	if got != address {
+		return fmt.Errorf("address %q is not normalised; it should be %q", address, got)
+	}
+	return inHostedDomain(address, hosted)
+}
+
+func mailboxFields(m store.Mailbox) error {
+	if _, err := store.ParseState(string(m.State)); err != nil {
+		return fmt.Errorf("mailbox %s: %w", m.Address, err)
+	}
+	if !strings.HasPrefix(m.Hash, store.HashPrefix) || strings.ContainsFunc(m.Hash, func(r rune) bool {
+		return r == ':' || unicode.IsSpace(r) || unicode.IsControl(r)
+	}) {
+		return fmt.Errorf("mailbox %s: the password hash must start with %s and contain no colon, whitespace or control character", m.Address, store.HashPrefix)
+	}
+	if strings.ContainsFunc(m.Name, unicode.IsControl) {
+		return fmt.Errorf("mailbox %s: the display name contains a control character", m.Address)
 	}
 	return nil
 }
@@ -226,11 +268,8 @@ func findLoop(list []store.Alias, aliases map[string][]string) error {
 func AliasesTargeting(s store.Snapshot, address string) []string {
 	var out []string
 	for _, a := range s.Aliases {
-		for _, t := range a.Targets {
-			if t == address {
-				out = append(out, a.Address)
-				break
-			}
+		if slices.Contains(a.Targets, address) {
+			out = append(out, a.Address)
 		}
 	}
 	return out

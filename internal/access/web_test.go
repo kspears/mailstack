@@ -63,7 +63,7 @@ func TestWebHandlerWithCloudflareIdentifier(t *testing.T) {
 	cf := access.NewCloudflareForTest(u.Host, aud, []string{"admin@example.test"}, certs.Client(), certs.URL, func() time.Time { return now })
 
 	dir := t.TempDir()
-	admin, err := generate.Open(generate.Config{State: filepath.Join(dir, "state"), MailRoot: filepath.Join(dir, "mail"), UID: 5000, GID: 5000, WatcherOff: true})
+	admin, err := generate.Open(generate.Config{State: filepath.Join(dir, "state"), MailRoot: filepath.Join(dir, "mail"), WatcherOff: true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

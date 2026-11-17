@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/kspears/mailstack/internal/store"
 )
 
 // StageKeys writes the key files into a fresh private directory next to dir.
@@ -82,7 +84,7 @@ func InstallKeys(staged, dir string, now time.Time) (replaced string, err error)
 	if err := os.Chmod(staged, info.Mode().Perm()); err != nil {
 		return "", err
 	}
-	replaced = fmt.Sprintf("%s.replaced-%s", dir, now.UTC().Format("20060102T150405Z"))
+	replaced = store.ReplacedName(dir, now)
 	if err := os.Rename(dir, replaced); err != nil {
 		return "", err
 	}

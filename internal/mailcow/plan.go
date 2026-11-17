@@ -10,8 +10,6 @@ import (
 	"github.com/kspears/mailstack/internal/validate"
 )
 
-const hashPrefix = "{BLF-CRYPT}"
-
 // Options are the choices the owner makes on the command line.
 type Options struct {
 	SkipMailboxes []string
@@ -21,6 +19,34 @@ type Options struct {
 	RelayHost string
 }
 
+// Stop item names, used by the planner, the stop-item table and the SQL and file
+// counts, so a misspelling cannot silently read as zero rows.
+const (
+	itemAliasDomains         = "alias-domains"
+	itemCatchAllAliases      = "catch-all-aliases"
+	itemSpecialAliasTargets  = "special-alias-targets"
+	itemBCCMaps              = "bcc-maps"
+	itemRecipientMaps        = "recipient-maps"
+	itemTransportMaps        = "transport-maps"
+	itemRelayhostsInUse      = "relayhosts-in-use"
+	itemRelayhostsUnused     = "relayhosts-unused"
+	itemTemporaryAliases     = "temporary-aliases"
+	itemSyncJobs             = "sync-jobs"
+	itemForwardingHosts      = "forwarding-hosts"
+	itemDomainFooters        = "domain-footers"
+	itemSieveFilters         = "sieve-filters"
+	itemSieveScripts         = "sieve-scripts"
+	itemProtocolRestrictions = "mailbox-protocol-restrictions"
+	itemSpamSettings         = "spam-settings"
+	itemRateLimits           = "rate-limits"
+	itemAppPasswords         = "app-passwords"
+	itemTFA                  = "tfa"
+	itemInactiveAliases      = "inactive-aliases"
+	itemExternalSendAs       = "external-send-as"
+	itemSharedFolderACLs     = "shared-folder-acls"
+	itemRspamdMaps           = "global-rspamd-maps"
+)
+
 type stopItem struct {
 	name    string
 	ackable bool
@@ -29,29 +55,29 @@ type stopItem struct {
 // stopItems lists, in reporting order, everything in mailcow that can change
 // mail behaviour and has no destination in the new stack.
 var stopItems = []stopItem{
-	{"alias-domains", false},
-	{"catch-all-aliases", false},
-	{"special-alias-targets", false},
-	{"bcc-maps", true},
-	{"recipient-maps", true},
-	{"transport-maps", true},
-	{"relayhosts-in-use", false},
-	{"relayhosts-unused", true},
-	{"temporary-aliases", true},
-	{"sync-jobs", true},
-	{"forwarding-hosts", true},
-	{"domain-footers", true},
-	{"sieve-filters", true},
-	{"sieve-scripts", true},
-	{"mailbox-protocol-restrictions", true},
-	{"spam-settings", true},
-	{"rate-limits", true},
-	{"app-passwords", true},
-	{"tfa", true},
-	{"inactive-aliases", true},
-	{"external-send-as", true},
-	{"shared-folder-acls", true},
-	{"global-rspamd-maps", true},
+	{itemAliasDomains, false},
+	{itemCatchAllAliases, false},
+	{itemSpecialAliasTargets, false},
+	{itemBCCMaps, true},
+	{itemRecipientMaps, true},
+	{itemTransportMaps, true},
+	{itemRelayhostsInUse, false},
+	{itemRelayhostsUnused, true},
+	{itemTemporaryAliases, true},
+	{itemSyncJobs, true},
+	{itemForwardingHosts, true},
+	{itemDomainFooters, true},
+	{itemSieveFilters, true},
+	{itemSieveScripts, true},
+	{itemProtocolRestrictions, true},
+	{itemSpamSettings, true},
+	{itemRateLimits, true},
+	{itemAppPasswords, true},
+	{itemTFA, true},
+	{itemInactiveAliases, true},
+	{itemExternalSendAs, true},
+	{itemSharedFolderACLs, true},
+	{itemRspamdMaps, true},
 }
 
 // ParseAcknowledge validates item names given to --acknowledge.
@@ -164,13 +190,6 @@ type planner struct {
 
 	mailboxSet map[string]bool
 	aliasSet   map[string]bool
-	relays     map[string]string
-}
-
-func (p *planner) fail(format string, args ...any) {
-	if p.err == nil {
-		p.err = fmt.Errorf(format, args...)
-	}
 }
 
 func (p *planner) failErr(err error) {
@@ -190,11 +209,11 @@ func (p *planner) domains() {
 		}
 		switch {
 		case !d.Active:
-			p.fail("domain %s is inactive; activate it in mailcow or remove it before importing", name)
+			p.failErr(fmt.Errorf("domain %s is inactive; activate it in mailcow or remove it before importing", name))
 		case d.BackupMX:
-			p.fail("domain %s is a backup MX, which the new stack does not support", name)
+			p.failErr(fmt.Errorf("domain %s is a backup MX, which the new stack does not support", name))
 		case d.RelayAll || d.RelayUnknown:
-			p.fail("domain %s is a relay domain, which the new stack does not support", name)
+			p.failErr(fmt.Errorf("domain %s is a relay domain, which the new stack does not support", name))
 		}
 		p.hosted[name] = true
 		p.snap.Domains = append(p.snap.Domains, name)
@@ -213,7 +232,7 @@ func (p *planner) mailboxes() {
 		addr := norm(m.Address)
 		if m.Active == 0 {
 			if !skip[addr] {
-				p.fail("mailbox %s is disabled; pass --skip-mailbox %s to leave it behind", addr, addr)
+				p.failErr(fmt.Errorf("mailbox %s is disabled; pass --skip-mailbox %s to leave it behind", addr, addr))
 				continue
 			}
 			delete(skip, addr)
@@ -221,19 +240,19 @@ func (p *planner) mailboxes() {
 			continue
 		}
 		if m.Active != 1 && m.Active != 2 {
-			p.fail("mailbox %s has unknown active value %d", addr, m.Active)
+			p.failErr(fmt.Errorf("mailbox %s has unknown active value %d", addr, m.Active))
 			continue
 		}
-		if _, err := validate.Address(addr); err != nil {
+		if _, err := validate.HostedName(addr); err != nil {
 			p.failErr(err)
 			continue
 		}
 		if _, domain := validate.Split(addr); !p.hosted[domain] {
-			p.fail("mailbox %s is in %s, which is not a carried domain", addr, domain)
+			p.failErr(fmt.Errorf("mailbox %s is in %s, which is not a carried domain", addr, domain))
 			continue
 		}
-		if !strings.HasPrefix(m.Hash, hashPrefix) {
-			p.fail("%s uses %s", addr, scheme(m.Hash))
+		if !strings.HasPrefix(m.Hash, store.HashPrefix) {
+			p.failErr(fmt.Errorf("%s uses %s", addr, scheme(m.Hash)))
 			continue
 		}
 		state := store.Active
@@ -250,10 +269,10 @@ func (p *planner) mailboxes() {
 		}
 	}
 	for s := range skip {
-		p.fail("--skip-mailbox %s: not a disabled mailbox; only disabled mailboxes can be skipped", s)
+		p.failErr(fmt.Errorf("--skip-mailbox %s: not a disabled mailbox; only disabled mailboxes can be skipped", s))
 	}
 	p.rep.Mailboxes = len(p.snap.Mailboxes)
-	p.counts["mailbox-protocol-restrictions"] = protocolRows
+	p.counts[itemProtocolRestrictions] = protocolRows
 }
 
 func scheme(hash string) string {
@@ -300,28 +319,21 @@ func hasRelayhost(id string) bool { return id != "" && id != "0" }
 // can never be acknowledged. mailcow does not use an inactive row, so an
 // assignment to one is not in use, but the row is still not unused.
 func (p *planner) relayhosts() {
-	p.relays = map[string]string{}
-	differs := map[string]bool{}
+	hostname, active := map[string]string{}, map[string]bool{}
 	for _, r := range p.d.Relayhosts {
-		p.relays[r.ID] = r.Hostname
+		hostname[r.ID], active[r.ID] = r.Hostname, r.Active
 		if sameRelay(r.Hostname, p.o.RelayHost) {
 			p.rep.RedundantRelayhosts++
-			continue
 		}
-		differs[r.ID] = true
-	}
-	active := map[string]bool{}
-	for _, r := range p.d.Relayhosts {
-		active[r.ID] = r.Active
 	}
 	var inUse int
 	assigned := map[string]bool{}
 	assign := func(id string) {
-		if !hasRelayhost(id) || sameRelay(p.relays[id], p.o.RelayHost) {
+		if !hasRelayhost(id) || sameRelay(hostname[id], p.o.RelayHost) {
 			return
 		}
 		assigned[id] = true
-		if _, known := p.relays[id]; !known || active[id] {
+		if _, known := hostname[id]; !known || active[id] {
 			inUse++
 		}
 	}
@@ -334,13 +346,13 @@ func (p *planner) relayhosts() {
 		}
 	}
 	var unused int
-	for id := range differs {
-		if !assigned[id] {
+	for _, r := range p.d.Relayhosts {
+		if !sameRelay(r.Hostname, p.o.RelayHost) && !assigned[r.ID] {
 			unused++
 		}
 	}
-	p.counts["relayhosts-in-use"] = inUse
-	p.counts["relayhosts-unused"] = unused
+	p.counts[itemRelayhostsInUse] = inUse
+	p.counts[itemRelayhostsUnused] = unused
 }
 
 func sameRelay(a, b string) bool { return b != "" && norm(a) == norm(b) }
@@ -369,17 +381,17 @@ func (p *planner) aliases() {
 			pending = append(pending, pendingAlias{addr, targets})
 		}
 	}
-	p.counts["catch-all-aliases"] = catchAll
-	p.counts["inactive-aliases"] = inactive
+	p.counts[itemCatchAllAliases] = catchAll
+	p.counts[itemInactiveAliases] = inactive
 
 	var special int
 	for _, a := range pending {
-		if _, err := validate.Address(a.address); err != nil {
+		if _, err := validate.HostedName(a.address); err != nil {
 			p.failErr(err)
 			continue
 		}
 		if _, domain := validate.Split(a.address); !p.hosted[domain] {
-			p.fail("alias %s is in %s, which is not a carried domain", a.address, domain)
+			p.failErr(fmt.Errorf("alias %s is in %s, which is not a carried domain", a.address, domain))
 			continue
 		}
 		if p.hasSpecialTarget(a.targets) {
@@ -388,7 +400,7 @@ func (p *planner) aliases() {
 		}
 		p.snap.Aliases = append(p.snap.Aliases, store.Alias{Address: a.address, Targets: a.targets})
 	}
-	p.counts["special-alias-targets"] = special
+	p.counts[itemSpecialAliasTargets] = special
 	p.rep.Aliases = len(p.snap.Aliases)
 }
 
@@ -433,7 +445,7 @@ func (p *planner) grants() {
 			continue
 		}
 		if _, err := validate.Address(grant.Address); err != nil {
-			p.fail("send-as grant for %s: %v", grant.Mailbox, err)
+			p.failErr(fmt.Errorf("send-as grant for %s: %v", grant.Mailbox, err))
 			continue
 		}
 		if !seen[grant] {
@@ -441,7 +453,7 @@ func (p *planner) grants() {
 			p.snap.Grants = append(p.snap.Grants, grant)
 		}
 	}
-	p.counts["external-send-as"] = external
+	p.counts[itemExternalSendAs] = external
 	p.rep.Grants = len(p.snap.Grants)
 }
 
@@ -450,21 +462,21 @@ func (p *planner) dkim() {
 	for _, domain := range p.snap.Domains {
 		selector := p.d.DKIMSelectors[domain]
 		if selector == "" {
-			p.fail("domain %s has no DKIM selector in DKIM_SELECTORS", domain)
+			p.failErr(fmt.Errorf("domain %s has no DKIM selector in DKIM_SELECTORS", domain))
 			continue
 		}
 		if !validSelector(selector) {
-			p.fail("domain %s has a DKIM selector %q that is not safe to use in a file name", domain, selector)
+			p.failErr(fmt.Errorf("domain %s has a DKIM selector %q that is not safe to use in a file name", domain, selector))
 			continue
 		}
 		field := selector + "." + domain
 		pem, ok := p.d.DKIMKeys[field]
 		if !ok {
-			p.fail("domain %s has no DKIM key %s in DKIM_PRIV_KEYS", domain, field)
+			p.failErr(fmt.Errorf("domain %s has no DKIM key %s in DKIM_PRIV_KEYS", domain, field))
 			continue
 		}
 		if !strings.Contains(pem, "-----BEGIN") {
-			p.fail("the DKIM key for %s is not a PEM private key", domain)
+			p.failErr(fmt.Errorf("the DKIM key for %s is not a PEM private key", domain))
 			continue
 		}
 		used[field] = true

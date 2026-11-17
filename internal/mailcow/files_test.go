@@ -23,23 +23,23 @@ func TestCountSieveScripts(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "example.test", "alice", "Maildir", "cur"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := CountSieveScripts(root); err != nil || n != 0 {
+	if n, err := countSieveScripts(root); err != nil || n != 0 {
 		t.Fatalf("only the global scripts: %d, %v", n, err)
 	}
 	if err := os.Mkdir(filepath.Join(root, "example.test", "alice", "sieve"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := CountSieveScripts(root); n != 0 {
+	if n, _ := countSieveScripts(root); n != 0 {
 		t.Errorf("an empty sieve directory counted: %d", n)
 	}
 	put(t, filepath.Join(root, "sieve", "extra.sieve"), "x")
 	put(t, filepath.Join(root, "example.test", "alice", "sieve", "mine.sieve"), "x")
 	put(t, filepath.Join(root, "example.test", "bob", "active.sieve"), "x")
 	put(t, filepath.Join(root, "example.test", "bob", "Maildir", "note.txt"), "x")
-	if n, err := CountSieveScripts(root); err != nil || n != 3 {
+	if n, err := countSieveScripts(root); err != nil || n != 3 {
 		t.Errorf("count = %d, %v; want a stray global, a non-empty sieve directory and a home script", n, err)
 	}
-	if _, err := CountSieveScripts(filepath.Join(root, "missing")); err == nil {
+	if _, err := countSieveScripts(filepath.Join(root, "missing")); err == nil {
 		t.Error("a missing mail root was not an error")
 	}
 }
@@ -50,18 +50,18 @@ func TestCountFolderACLs(t *testing.T) {
 	put(t, filepath.Join(box, "cur", "dovecot-acl"), "must not be looked at")
 	put(t, filepath.Join(box, ".Shared", "new", "dovecot-acl"), "must not be looked at")
 	put(t, filepath.Join(box, ".Empty", "dovecot-acl"), "")
-	if n, err := CountFolderACLs(root); err != nil || n != 0 {
+	if n, err := countFolderACLs(root); err != nil || n != 0 {
 		t.Fatalf("no real ACLs: %d, %v", n, err)
 	}
 	put(t, filepath.Join(box, "dovecot-acl"), "anyone lr")
 	put(t, filepath.Join(box, ".Shared", "dovecot-acl"), "user=bob lr")
 	put(t, filepath.Join(box, ".Shared", ".Deep", "dovecot-acl"), "user=bob lr")
 	put(t, filepath.Join(root, "shared-mailboxes.db"), "x")
-	if n, err := CountFolderACLs(root); err != nil || n != 4 {
+	if n, err := countFolderACLs(root); err != nil || n != 4 {
 		t.Errorf("count = %d, %v; want the root, folder, nested folder and shared-mailboxes.db", n, err)
 	}
 	put(t, filepath.Join(root, "example.test", "carol", "stray"), "no Maildir here")
-	if n, _ := CountFolderACLs(root); n != 4 {
+	if n, _ := countFolderACLs(root); n != 4 {
 		t.Errorf("a home without a Maildir changed the count: %d", n)
 	}
 }
@@ -71,10 +71,10 @@ func TestCountRspamdMapLines(t *testing.T) {
 	put(t, filepath.Join(dir, "a.map"), "# comment\n\n  \nfirst\n  # indented comment\nsecond\n")
 	put(t, filepath.Join(dir, "b.map"), "third")
 	put(t, filepath.Join(dir, "ignored.txt"), "not a map\n")
-	if n, err := CountRspamdMapLines(dir); err != nil || n != 3 {
+	if n, err := countRspamdMapLines(dir); err != nil || n != 3 {
 		t.Errorf("count = %d, %v", n, err)
 	}
-	if _, err := CountRspamdMapLines(filepath.Join(dir, "missing")); err == nil {
+	if _, err := countRspamdMapLines(filepath.Join(dir, "missing")); err == nil {
 		t.Error("a missing directory was not an error")
 	}
 }

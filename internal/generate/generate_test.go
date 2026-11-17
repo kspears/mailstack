@@ -29,12 +29,11 @@ func fixture() store.Snapshot {
 }
 
 func TestRender(t *testing.T) {
-	cfg := Config{MailRoot: "/var/vmail", UID: 5000, GID: 5001}
-	got := Render(fixture(), cfg)
+	got := Render(fixture())
 	want := Files{
-		FileUsers: "alice@example.test:{BLF-CRYPT}$2y$10$aaa:5000:5001::/var/vmail/example.test/alice::\n" +
-			"bob@example.test:{BLF-CRYPT}$2y$10$bbb:5000:5001::/var/vmail/example.test/bob::nologin=y\n" +
-			"dave@example.org:{BLF-CRYPT}$2y$10$ddd:5000:5001::/var/vmail/example.org/dave::\n",
+		FileUsers: "alice@example.test:{BLF-CRYPT}$2y$10$aaa::::::\n" +
+			"bob@example.test:{BLF-CRYPT}$2y$10$bbb::::::nologin=y\n" +
+			"dave@example.org:{BLF-CRYPT}$2y$10$ddd::::::\n",
 		FileDomains:   "example.org OK\nexample.test OK\n",
 		FileMailboxes: "alice@example.test OK\nbob@example.test OK\ndave@example.org OK\n",
 		FileAliases: "info@example.test alice@example.test\n" +
@@ -56,7 +55,7 @@ func TestRender(t *testing.T) {
 }
 
 func TestRenderEmpty(t *testing.T) {
-	for name, content := range Render(store.Snapshot{}, Config{}) {
+	for name, content := range Render(store.Snapshot{}) {
 		if content != "" {
 			t.Errorf("%s = %q, want empty", name, content)
 		}
@@ -64,18 +63,19 @@ func TestRenderEmpty(t *testing.T) {
 }
 
 func TestSelfCheck(t *testing.T) {
-	good := Render(fixture(), Config{MailRoot: "/var/vmail", UID: 5000, GID: 5000})
+	good := Render(fixture())
 	tests := []struct {
 		name    string
 		mutate  func(Files)
 		wantErr string
 	}{
 		{"valid", func(Files) {}, ""},
-		{"unresolved alias target", func(f Files) { f[FileAliases] += "x@example.test ghost@example.test\n" }, "does not resolve"},
-		{"mailbox and alias", func(f Files) { f[FileAliases] += "alice@example.test away@example.net\n" }, "both a mailbox and an alias"},
+		{"empty", func(f Files) {
+			for k := range f {
+				f[k] = ""
+			}
+		}, ""},
 		{"no trailing newline", func(f Files) { f[FileDomains] = "example.test OK" }, "newline-terminated"},
-		{"malformed users line", func(f Files) { f[FileUsers] = "alice@example.test:x\n" }, "malformed"},
-		{"user without mailbox", func(f Files) { f[FileMailboxes] = "alice@example.test OK\ndave@example.org OK\n" }, "does not"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,7 +88,7 @@ func TestSelfCheck(t *testing.T) {
 			if err := writeGeneration(dir, f); err != nil {
 				t.Fatal(err)
 			}
-			err := SelfCheck(dir)
+			err := SelfCheck(dir, f)
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -99,8 +99,31 @@ func TestSelfCheck(t *testing.T) {
 	}
 }
 
+func TestSelfCheckRoundTrip(t *testing.T) {
+	want := Render(fixture())
+	dir := t.TempDir()
+	if err := writeGeneration(dir, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := SelfCheck(dir, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, FileAliases), []byte("x@example.test y@example.test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SelfCheck(dir, want); err == nil || !strings.Contains(err.Error(), "not what was rendered") {
+		t.Errorf("a changed file: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, FileUsers)); err != nil {
+		t.Fatal(err)
+	}
+	if err := SelfCheck(dir, want); err == nil || !strings.Contains(err.Error(), "self-check") {
+		t.Errorf("a missing file: %v", err)
+	}
+}
+
 func TestIDSortsByTime(t *testing.T) {
-	f := Render(fixture(), Config{})
+	f := Render(fixture())
 	a := f.ID(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	b := f.ID(time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC))
 	if a >= b {
@@ -111,10 +134,10 @@ func TestIDSortsByTime(t *testing.T) {
 func newAdmin(t *testing.T, watcher bool) *Admin {
 	t.Helper()
 	cfg := Config{
-		State: t.TempDir(), MailRoot: t.TempDir(), UID: 5000, GID: 5000,
+		State: t.TempDir(), MailRoot: t.TempDir(),
 		WatcherOff: !watcher, Timeout: 3 * time.Second, Poll: 5 * time.Millisecond,
 	}
-	a, err := Open(cfg)
+	a, err := Open(cfg, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +375,7 @@ func TestOperations(t *testing.T) {
 		t.Errorf("unexpected final state: %+v", snap)
 	}
 	users, _ := os.ReadFile(filepath.Join(a.gens, "current", FileUsers))
-	if !strings.Contains(string(users), "alice@example.test:{BLF-CRYPT}$2y$10$") || !strings.HasSuffix(string(users), "::nologin=y\n") {
+	if !strings.Contains(string(users), "alice@example.test:{BLF-CRYPT}$2y$10$") || !strings.HasSuffix(string(users), "::::::nologin=y\n") {
 		t.Errorf("users file = %q", users)
 	}
 }
@@ -427,10 +450,10 @@ func TestApplyRefusesEmptyStoreOverPopulatedFiles(t *testing.T) {
 	}
 	// A replaced store.db: same state directory, fresh empty database.
 	a.Close()
-	if err := os.Remove(a.storePath); err != nil {
+	if err := os.Remove(StorePath(a.cfg)); err != nil {
 		t.Fatal(err)
 	}
-	fresh, err := OpenForResync(a.cfg)
+	fresh, err := Open(a.cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,19 +484,29 @@ func TestOpenRefusesToCreateLostStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Close()
-	if err := os.Remove(a.storePath); err != nil {
+	if err := os.Remove(StorePath(a.cfg)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Open(a.cfg)
-	if want := "account store " + a.storePath + " is missing but generated files exist; restore it from backup"; err == nil || err.Error() != want {
+	_, err := Open(a.cfg, false)
+	if want := "account store " + StorePath(a.cfg) + " is missing but generated files exist; restore it from backup"; err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
 	}
-	if _, err := os.Stat(a.storePath); err == nil {
+	if _, err := os.Stat(StorePath(a.cfg)); err == nil {
 		t.Error("store.db was created")
 	}
 
+	// Only an explicit resync may start over next to a generation in use.
+	c, err := Open(a.cfg, true)
+	if err != nil {
+		t.Fatalf("allowCreate: %v", err)
+	}
+	c.Close()
+	if _, err := os.Stat(StorePath(a.cfg)); err != nil {
+		t.Errorf("allowCreate did not create the store: %v", err)
+	}
+
 	fresh := Config{State: t.TempDir(), MailRoot: t.TempDir()}
-	b, err := Open(fresh)
+	b, err := Open(fresh, false)
 	if err != nil {
 		t.Fatalf("first bootstrap: %v", err)
 	}
@@ -482,19 +515,19 @@ func TestOpenRefusesToCreateLostStore(t *testing.T) {
 
 func TestStoreIsPrivate(t *testing.T) {
 	a := newAdmin(t, false)
-	if st, err := os.Stat(a.storePath); err != nil || st.Mode().Perm() != 0o600 {
+	if st, err := os.Stat(StorePath(a.cfg)); err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("store.db: %v %v", st, err)
 	}
 	a.Close()
-	if err := os.Chmod(a.storePath, 0o644); err != nil {
+	if err := os.Chmod(StorePath(a.cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b, err := Open(a.cfg)
+	b, err := Open(a.cfg, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	if st, _ := os.Stat(a.storePath); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(StorePath(a.cfg)); st.Mode().Perm() != 0o600 {
 		t.Errorf("mode after open = %v", st.Mode().Perm())
 	}
 	if st, err := os.Stat(watcherDir(a.cfg)); err != nil || !st.IsDir() || st.Mode().Perm() != 0o755 {

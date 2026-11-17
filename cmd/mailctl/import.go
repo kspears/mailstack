@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/mailcow"
-	"github.com/kspears/mailstack/internal/store"
 	"github.com/kspears/mailstack/internal/validate"
 )
 
@@ -91,18 +91,7 @@ func (e *env) importMailcow(args []string) error {
 	if err != nil {
 		return err
 	}
-	storePath := filepath.Join(cfg.State, "store.db")
-	occupied, err := storeHoldsAccounts(storePath)
-	if err != nil {
-		return err
-	}
-	if occupied && !f.overwrite {
-		return fmt.Errorf("a store already exists at %s; pass --overwrite to replace it", storePath)
-	}
-	dkimDir := e.getenv("MAILCTL_DKIM_DIR")
-	if dkimDir == "" {
-		dkimDir = filepath.Join(cfg.State, "dkim")
-	}
+	dkimDir := cmp.Or(e.getenv("MAILCTL_DKIM_DIR"), filepath.Join(cfg.State, "dkim"))
 
 	data, err := src.Read(context.Background())
 	if err != nil {
@@ -117,7 +106,7 @@ func (e *env) importMailcow(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkSnapshot(snap); err != nil {
+	if err := validate.Consistency(snap); err != nil {
 		return err
 	}
 	if err := mailcow.CheckKeyTargets(dkimDir, rep.DKIM, f.overwrite); err != nil {
@@ -135,12 +124,12 @@ func (e *env) importMailcow(args []string) error {
 	if err != nil {
 		return err
 	}
-	admin, err := generate.OpenForResync(cfg)
+	admin, err := generate.Open(cfg, f.overwrite)
 	if err != nil {
 		os.RemoveAll(staged)
 		return err
 	}
-	_, replaced, err := admin.Import(e.actor(), snap, f.overwrite)
+	replaced, err := admin.Import(e.actor(), snap, f.overwrite)
 	admin.Close()
 	if err != nil {
 		os.RemoveAll(staged)
@@ -163,32 +152,6 @@ func (e *env) importMailcow(args []string) error {
 	return nil
 }
 
-// checkSnapshot runs the same checks the import will, before anything is written.
-func checkSnapshot(snap store.Snapshot) error {
-	for _, d := range snap.Domains {
-		if got, err := validate.Domain(d); err != nil || got != d {
-			return fmt.Errorf("domain %q is not valid here: %v", d, err)
-		}
-	}
-	return validate.Consistency(snap)
-}
-
-func storeHoldsAccounts(path string) (bool, error) {
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	st, err := store.Open(path)
-	if err != nil {
-		return false, err
-	}
-	defer st.Close()
-	snap, err := st.Snapshot()
-	if err != nil {
-		return false, err
-	}
-	return len(snap.Domains)+len(snap.Mailboxes)+len(snap.Aliases) > 0, nil
-}
-
 func (e *env) required(name string) (string, error) {
 	v := e.getenv(name)
 	if v == "" {
@@ -204,7 +167,7 @@ func (e *env) required(name string) (string, error) {
 // mounted at the same path.
 func (e *env) openMailcow(redisOnly bool) (mailcow.Live, func(), error) {
 	live := mailcow.Live{
-		MailRoot:        e.mailcowMailRoot(),
+		MailRoot:        cmp.Or(e.getenv("MAILCOW_VMAIL_ROOT"), e.getenv("MAILCTL_MAIL_ROOT")),
 		RspamdCustomDir: e.getenv("MAILCOW_RSPAMD_CUSTOM_DIR"),
 	}
 	addr, err := e.required("MAILCOW_REDIS_ADDR")
@@ -232,13 +195,6 @@ func (e *env) openMailcow(redisOnly bool) (mailcow.Live, func(), error) {
 		}
 		live.Redis.Close()
 	}, nil
-}
-
-func (e *env) mailcowMailRoot() string {
-	if root := e.getenv("MAILCOW_VMAIL_ROOT"); root != "" {
-		return root
-	}
-	return e.getenv("MAILCTL_MAIL_ROOT")
 }
 
 // copyBayes copies rspamd statistics when asked; on a dry run it only counts.

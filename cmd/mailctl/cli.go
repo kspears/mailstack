@@ -16,6 +16,7 @@ import (
 
 	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/store"
+	"github.com/kspears/mailstack/internal/validate"
 )
 
 type env struct {
@@ -33,7 +34,7 @@ const usage = `mailctl mailbox list|add|passwd|state|remove ...
        mailctl alias list|add|remove ...
        mailctl sendas list|add|remove ...
        mailctl domain list|add|remove ...
-       mailctl log | apply [--publish-empty] | serve | import-mailcow | learn spam|ham | install-self <directory>`
+       mailctl log | apply [--publish-empty] | serve | import-mailcow | learn --controller <url> --password-file <path> spam|ham | install-self <directory>`
 
 func run(args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
 	e := &env{getenv, stdin, stdout, stderr}
@@ -71,19 +72,17 @@ func (e *env) dispatch(args []string) error {
 		return e.learn(rest)
 	case "install-self":
 		return e.installSelf(rest)
+	case "apply":
+		return e.apply(rest)
 	}
-	if !slices.Contains([]string{"mailbox", "alias", "sendas", "domain", "log", "apply"}, cmd) {
+	if !slices.Contains([]string{"mailbox", "alias", "sendas", "domain", "log"}, cmd) {
 		return usageError(usage)
 	}
 	cfg, err := generate.ConfigFromEnv(e.getenv)
 	if err != nil {
 		return err
 	}
-	open := generate.Open
-	if cmd == "apply" {
-		open = generate.OpenForResync
-	}
-	admin, err := open(cfg)
+	admin, err := generate.Open(cfg, false)
 	if err != nil {
 		return err
 	}
@@ -97,23 +96,31 @@ func (e *env) dispatch(args []string) error {
 		return e.sendas(admin, rest)
 	case "domain":
 		return e.domain(admin, rest)
-	case "log":
-		return e.log(admin, rest)
 	default:
-		return e.apply(admin, rest)
+		return e.log(admin, rest)
 	}
 }
 
-func (e *env) apply(a *generate.Admin, args []string) error {
-	const u = "apply [--publish-empty]"
+// apply is the one command besides the mailcow import that may start from a lost
+// store, and only with --publish-empty.
+func (e *env) apply(args []string) error {
 	var publishEmpty bool
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&publishEmpty, "publish-empty", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
-		return usageError(u)
+		return usageError("apply [--publish-empty]")
 	}
-	return e.ok(a.Apply(e.actor(), publishEmpty))
+	cfg, err := generate.ConfigFromEnv(e.getenv)
+	if err != nil {
+		return err
+	}
+	admin, err := generate.Open(cfg, publishEmpty)
+	if err != nil {
+		return err
+	}
+	defer admin.Close()
+	return e.ok(admin.Apply(e.actor(), publishEmpty))
 }
 
 func (e *env) ok(summary string, err error) error {
@@ -144,15 +151,11 @@ func (e *env) mailbox(a *generate.Admin, args []string) error {
 	actor := e.actor()
 	switch {
 	case args[0] == "list" && len(pos) == 0:
-		snap, err := a.Snapshot()
-		if err != nil {
-			return err
-		}
-		w := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
-		for _, m := range snap.Mailboxes {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", m.Address, m.State, m.Name)
-		}
-		return w.Flush()
+		return e.list(a, func(w io.Writer, snap store.Snapshot) {
+			for _, m := range snap.Mailboxes {
+				fmt.Fprintf(w, "%s\t%s\t%s\n", m.Address, m.State, m.Name)
+			}
+		})
 	case args[0] == "add" && len(pos) == 1:
 		pw, err := e.newPassword()
 		if err != nil {
@@ -185,14 +188,11 @@ func (e *env) alias(a *generate.Admin, args []string) error {
 	actor, rest := e.actor(), args[1:]
 	switch {
 	case args[0] == "list" && len(rest) == 0:
-		snap, err := a.Snapshot()
-		if err != nil {
-			return err
-		}
-		for _, al := range snap.Aliases {
-			fmt.Fprintf(e.stdout, "%s -> %s\n", al.Address, strings.Join(al.Targets, ","))
-		}
-		return nil
+		return e.list(a, func(w io.Writer, snap store.Snapshot) {
+			for _, al := range snap.Aliases {
+				fmt.Fprintf(w, "%s -> %s\n", al.Address, strings.Join(al.Targets, ","))
+			}
+		})
 	case args[0] == "add" && len(rest) == 2:
 		return e.ok(a.AddAlias(actor, rest[0], strings.Split(rest[1], ",")))
 	case args[0] == "remove" && len(rest) == 1:
@@ -209,15 +209,11 @@ func (e *env) sendas(a *generate.Admin, args []string) error {
 	actor, rest := e.actor(), args[1:]
 	switch {
 	case args[0] == "list" && len(rest) == 0:
-		snap, err := a.Snapshot()
-		if err != nil {
-			return err
-		}
-		w := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
-		for _, g := range snap.Grants {
-			fmt.Fprintf(w, "%s\t%s\n", g.Mailbox, g.Address)
-		}
-		return w.Flush()
+		return e.list(a, func(w io.Writer, snap store.Snapshot) {
+			for _, g := range snap.Grants {
+				fmt.Fprintf(w, "%s\t%s\n", g.Mailbox, g.Address)
+			}
+		})
 	case args[0] == "add" && len(rest) == 2:
 		return e.ok(a.AddSendAs(actor, rest[0], rest[1]))
 	case args[0] == "remove" && len(rest) == 2:
@@ -234,20 +230,29 @@ func (e *env) domain(a *generate.Admin, args []string) error {
 	actor, rest := e.actor(), args[1:]
 	switch {
 	case args[0] == "list" && len(rest) == 0:
-		snap, err := a.Snapshot()
-		if err != nil {
-			return err
-		}
-		for _, d := range snap.Domains {
-			fmt.Fprintln(e.stdout, d)
-		}
-		return nil
+		return e.list(a, func(w io.Writer, snap store.Snapshot) {
+			for _, d := range snap.Domains {
+				fmt.Fprintln(w, d)
+			}
+		})
 	case args[0] == "add" && len(rest) == 1:
 		return e.ok(a.AddDomain(actor, rest[0]))
 	case args[0] == "remove" && len(rest) == 1:
 		return e.ok(a.RemoveDomain(actor, rest[0]))
 	}
 	return usageError(u)
+}
+
+// list prints the rows that rows writes from the current account set; cells are
+// tab-separated and aligned.
+func (e *env) list(a *generate.Admin, rows func(w io.Writer, snap store.Snapshot)) error {
+	snap, err := a.Snapshot()
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
+	rows(w, snap)
+	return w.Flush()
 }
 
 func (e *env) log(a *generate.Admin, args []string) error {
@@ -282,37 +287,34 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 
 // newPassword prompts twice without echo on a terminal, or reads two lines from stdin otherwise.
 func (e *env) newPassword() (string, error) {
-	if f, ok := e.stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
-		first, err := e.prompt(f, "Password: ")
-		if err != nil {
-			return "", err
-		}
-		second, err := e.prompt(f, "Repeat password: ")
-		if err != nil {
-			return "", err
-		}
-		return matching(first, second)
-	}
-	r := bufio.NewReader(e.stdin)
-	first, err := readLine(r)
+	read := e.passwordReader()
+	first, err := read("Password: ")
 	if err != nil {
 		return "", err
 	}
-	second, err := readLine(r)
+	second, err := read("Repeat password: ")
 	if err != nil {
 		return "", err
 	}
-	return matching(first, second)
+	return validate.SamePassword(first, second)
 }
 
-func (e *env) prompt(f *os.File, label string) (string, error) {
-	fmt.Fprint(e.stderr, label)
-	b, err := term.ReadPassword(int(f.Fd()))
-	fmt.Fprintln(e.stderr)
-	if err != nil {
-		return "", fmt.Errorf("read password: %w", err)
+// passwordReader returns a reader of one password: a prompt on a terminal, the
+// next stdin line otherwise.
+func (e *env) passwordReader() func(label string) (string, error) {
+	if f, ok := e.stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		return func(label string) (string, error) {
+			fmt.Fprint(e.stderr, label)
+			b, err := term.ReadPassword(int(f.Fd()))
+			fmt.Fprintln(e.stderr)
+			if err != nil {
+				return "", fmt.Errorf("read password: %w", err)
+			}
+			return string(b), nil
+		}
 	}
-	return string(b), nil
+	r := bufio.NewReader(e.stdin)
+	return func(string) (string, error) { return readLine(r) }
 }
 
 func readLine(r *bufio.Reader) (string, error) {
@@ -321,11 +323,4 @@ func readLine(r *bufio.Reader) (string, error) {
 		return "", errors.New("expected the password twice on stdin, one per line")
 	}
 	return strings.TrimRight(line, "\r\n"), nil
-}
-
-func matching(a, b string) (string, error) {
-	if a != b {
-		return "", errors.New("passwords do not match")
-	}
-	return a, nil
 }

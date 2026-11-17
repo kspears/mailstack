@@ -3,13 +3,6 @@
 // writing are separate: Plan does no I/O.
 package mailcow
 
-import "context"
-
-// Source reads everything the import needs from mailcow without changing it.
-type Source interface {
-	Read(ctx context.Context) (Data, error)
-}
-
 // Data is what was read from mailcow, as plain values.
 type Data struct {
 	Domains    []Domain

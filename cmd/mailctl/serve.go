@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -22,10 +23,7 @@ func (e *env) serve(args []string) error {
 	if len(args) > 0 {
 		return usageError("serve")
 	}
-	listen := e.getenv("MAILCTL_LISTEN")
-	if listen == "" {
-		listen = ":8080"
-	}
+	listen := cmp.Or(e.getenv("MAILCTL_LISTEN"), ":8080")
 	id, err := e.identifier(listen)
 	if err != nil {
 		return err
@@ -34,7 +32,7 @@ func (e *env) serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	admin, err := generate.Open(cfg)
+	admin, err := generate.Open(cfg, false)
 	if err != nil {
 		return err
 	}

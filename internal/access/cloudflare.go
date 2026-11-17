@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +27,8 @@ const (
 	maxJWKSBytes    = 1 << 20
 )
 
-// KeySource returns the team's current signing keys by key id.
-type KeySource func(ctx context.Context) (map[string]*rsa.PublicKey, error)
+// keySource returns the team's current signing keys by key id.
+type keySource func(ctx context.Context) (map[string]*rsa.PublicKey, error)
 
 // Cloudflare verifies the Cloudflare Access JWT and checks the email against an allow-list.
 type Cloudflare struct {
@@ -46,7 +47,7 @@ func NewCloudflare(teamDomain, audience string, admins []string) *Cloudflare {
 	return newCloudflare(teamDomain, audience, admins, fetchJWKS(client, "https://"+teamDomain+"/cdn-cgi/access/certs"), time.Now)
 }
 
-func newCloudflare(teamDomain, audience string, admins []string, src KeySource, now func() time.Time) *Cloudflare {
+func newCloudflare(teamDomain, audience string, admins []string, src keySource, now func() time.Time) *Cloudflare {
 	allowed := make(map[string]bool, len(admins))
 	for _, a := range admins {
 		allowed[strings.ToLower(strings.TrimSpace(a))] = true
@@ -142,15 +143,7 @@ func audienceContains(raw json.RawMessage, want string) bool {
 		return one == want
 	}
 	var many []string
-	if json.Unmarshal(raw, &many) != nil {
-		return false
-	}
-	for _, a := range many {
-		if a == want {
-			return true
-		}
-	}
-	return false
+	return json.Unmarshal(raw, &many) == nil && slices.Contains(many, want)
 }
 
 func decodeSegment(seg string, v any) error {
@@ -167,7 +160,7 @@ func decodeSegment(seg string, v any) error {
 // keyCache holds the signing keys. It refetches on an unknown kid or when
 // older than keyMaxAge, and never more than once per keyMinRefetch.
 type keyCache struct {
-	src KeySource
+	src keySource
 	now func() time.Time
 
 	mu      sync.Mutex
@@ -204,7 +197,7 @@ func (k *keyCache) get(kid string) (*rsa.PublicKey, error) {
 	return key, nil
 }
 
-func fetchJWKS(client *http.Client, url string) KeySource {
+func fetchJWKS(client *http.Client, url string) keySource {
 	return func(ctx context.Context) (map[string]*rsa.PublicKey, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {

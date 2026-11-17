@@ -23,6 +23,10 @@ type fakeRedis struct {
 	keys     map[string]string
 	ttl      map[string]int64
 	received [][]string
+	// ghosts are listed by SCAN but gone by the time DUMP or PTTL ask for them.
+	ghosts map[string]bool
+	// pipelined counts commands that arrived while another was already buffered.
+	pipelined int
 }
 
 func startFake(t *testing.T, password string) *fakeRedis {
@@ -32,7 +36,7 @@ func startFake(t *testing.T, password string) *fakeRedis {
 		t.Fatal(err)
 	}
 	f := &fakeRedis{addr: l.Addr().String(), password: password,
-		hashes: map[string]map[string]string{}, keys: map[string]string{}, ttl: map[string]int64{}}
+		hashes: map[string]map[string]string{}, keys: map[string]string{}, ttl: map[string]int64{}, ghosts: map[string]bool{}}
 	t.Cleanup(func() { l.Close() })
 	go func() {
 		for {
@@ -91,6 +95,9 @@ func (f *fakeRedis) serve(c net.Conn) {
 		}
 		f.mu.Lock()
 		f.received = append(f.received, args)
+		if r.Buffered() > 0 {
+			f.pipelined++
+		}
 		reply := f.handle(args, &authed)
 		f.mu.Unlock()
 		io.WriteString(c, reply)
@@ -128,12 +135,12 @@ func (f *fakeRedis) handle(args []string, authed *bool) string {
 		return f.scan(args)
 	case "DUMP":
 		v, ok := f.keys[args[1]]
-		if !ok {
+		if !ok || f.ghosts[args[1]] {
 			return "$-1\r\n"
 		}
 		return bulk("\x00\r\n" + v)
 	case "PTTL":
-		if _, ok := f.keys[args[1]]; !ok {
+		if _, ok := f.keys[args[1]]; !ok || f.ghosts[args[1]] {
 			return ":-2\r\n"
 		}
 		ttl, ok := f.ttl[args[1]]
@@ -261,5 +268,65 @@ func TestCopyKeysCountOnly(t *testing.T) {
 	}
 	if want := []PatternCount{{"BAYES_*", 1}, {"*", 1}}; !reflect.DeepEqual(counts, want) {
 		t.Errorf("counts = %v, want %v", counts, want)
+	}
+}
+
+func TestCopyKeysPipelinesEachPage(t *testing.T) {
+	src, dstSrv := startFake(t, ""), startFake(t, "")
+	var binary strings.Builder
+	for b := range 256 {
+		binary.WriteByte(byte(b))
+	}
+	want := map[string]string{}
+	for i := range 7 {
+		key := fmt.Sprintf("BAYES_%d", i)
+		want[key] = fmt.Sprintf("%d\r\n\x00\xff", i) + binary.String() + "\r\n$5\r\n"
+		src.keys[key] = want[key]
+	}
+	src.ttl["BAYES_4"] = 9000
+	src.keys["BAYES_GONE"] = "never copied"
+	src.ghosts["BAYES_GONE"] = true
+
+	counts, err := CopyKeys(dial(t, src, "", true), dial(t, dstSrv, "", false), []string{"BAYES_*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(counts) != 1 || counts[0].Keys != 7 {
+		t.Errorf("counts = %v, want 7 keys", counts)
+	}
+	for key, v := range want {
+		if dstSrv.keys[key] != v {
+			t.Errorf("%s: payload differs (%d bytes, want %d)", key, len(dstSrv.keys[key]), len(v))
+		}
+	}
+	if _, ok := dstSrv.keys["BAYES_GONE"]; ok || len(dstSrv.keys) != 7 {
+		t.Errorf("a vanished key reached the destination: %d keys", len(dstSrv.keys))
+	}
+	if dstSrv.ttl["BAYES_4"] != 9000 || dstSrv.ttl["BAYES_0"] != 0 {
+		t.Errorf("ttls: %v", dstSrv.ttl)
+	}
+	if src.pipelined == 0 || dstSrv.pipelined == 0 {
+		t.Errorf("commands were not pipelined: source %d, destination %d", src.pipelined, dstSrv.pipelined)
+	}
+	for _, cmd := range src.commands() {
+		if !readOnlyCommands[cmd] {
+			t.Errorf("source received %s", cmd)
+		}
+	}
+	// SCAN pages hold two keys each, so 8 keys are 4 pages: one RESTORE batch per page
+	// that still had a key, and no more commands than DUMP and PTTL per key plus SCAN.
+	if got := len(src.commands()); got != 4+2*8 {
+		t.Errorf("source saw %d commands, want %d", got, 4+2*8)
+	}
+}
+
+func TestPipelineRefusesWritesOnReadOnlyBeforeSending(t *testing.T) {
+	f := startFake(t, "")
+	c := dial(t, f, "", true)
+	if _, err := c.Pipeline([][]string{{"PTTL", "a"}, {"RESTORE", "a", "0", "x"}}); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("err = %v", err)
+	}
+	if got := f.commands(); len(got) != 0 {
+		t.Errorf("server saw %v", got)
 	}
 }

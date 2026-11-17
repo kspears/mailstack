@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestHashPassword(t *testing.T) {
 func TestReopenAndVerbatimHash(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	const imported = "{BLF-CRYPT}$2y$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
-	s, err := Open(path)
+	s, err := Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestReopenAndVerbatimHash(t *testing.T) {
 }
 
 func TestRollbackDiscards(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	s, err := Create(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,5 +71,26 @@ func TestRollbackDiscards(t *testing.T) {
 	tx.Rollback()
 	if snap, _ := s.Snapshot(); len(snap.Domains) != 0 {
 		t.Errorf("rolled-back domain visible: %+v", snap)
+	}
+}
+
+func TestOpenNeverCreatesAndCreateNeverReplaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open succeeded on a missing file")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("Open created the file")
+	}
+	s, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("created file: %v %v", st, err)
+	}
+	if _, err := Create(path); err == nil {
+		t.Error("Create succeeded on an existing file")
 	}
 }

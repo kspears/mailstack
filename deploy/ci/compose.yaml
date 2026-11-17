@@ -15,16 +15,13 @@
 # Compose 2.23 or newer.
 name: mailstack-ci
 
-x-admin-build: &admin-build
-  context: ../..
-  dockerfile: images/admin/Dockerfile
-
 services:
   # Docker creates named volumes root-owned, and the dovecot image has no chown. Mail is
   # owned by uid 5000 (mail_uid in dovecot.conf). A volume `subpath` must exist when the
   # container starts, so this also creates the two state subdirectories mailctl makes itself.
   init:
     image: mailstack-postfix:ci
+    pull_policy: never # built by the postfix service below
     entrypoint:
       - sh
       - -c
@@ -39,7 +36,7 @@ services:
   # binary is what dovecot's Sieve scripts pipe messages to (`mailctl learn spam|ham`).
   learn-bin:
     image: mailstack-admin:ci
-    build: *admin-build
+    pull_policy: never # built by the admin service below, which owns the build
     entrypoint: ["mailctl", "install-self", "/sieve/bin"]
     volumes:
       - sieve_bin:/sieve/bin
@@ -123,7 +120,9 @@ services:
   # `docker compose run --rm -T admin mailbox add ...`. Never mounts the Docker socket.
   admin:
     image: mailstack-admin:ci
-    build: *admin-build
+    build:
+      context: ../..
+      dockerfile: images/admin/Dockerfile
     profiles: [tools]
     environment:
       MAILCTL_STATE: /data/mailstack

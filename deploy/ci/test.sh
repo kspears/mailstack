@@ -38,7 +38,10 @@ expect_ok() {
 }
 
 step "build images"
+# Pull the images that are not built here while the build runs.
+docker compose --profile tools pull --ignore-buildable --quiet &
 docker compose --profile tools build --quiet
+wait
 
 step "generate throwaway TLS, mail-encryption and rspamd controller keys"
 mkdir -p "$KEYS/tls" "$KEYS/mail_crypt" "$KEYS/rspamd"
@@ -66,7 +69,7 @@ docker compose up -d dovecot postfix
 probe wait postfix:25 postfix:465 postfix:587 dovecot:993 dovecot:24 dovecot:12345 rspamd:11332
 
 step "mailctl changes go through the real watcher: pending -> status -> current -> reload"
-printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | expect_ok docker compose run --rm -T admin mailbox add alice@example.test --name Alice
+printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | expect_ok mailctl mailbox add alice@example.test --name Alice
 expect_ok mailctl alias add info@example.test alice@example.test
 
 step "deliver to the alias from outside, read it back over IMAPS"

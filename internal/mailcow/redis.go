@@ -50,23 +50,41 @@ func (c *Redis) Close() error { return c.conn.Close() }
 
 // Do sends one command and returns its reply as nil, string, int64 or []any.
 func (c *Redis) Do(args ...string) (any, error) {
-	if c.readOnly && !readOnlyCommands[strings.ToUpper(args[0])] {
-		return nil, fmt.Errorf("refusing to send %s to a read-only redis connection", strings.ToUpper(args[0]))
+	replies, err := c.Pipeline([][]string{args})
+	if err != nil {
+		return nil, err
+	}
+	return replies[0], nil
+}
+
+// Pipeline sends every command before it reads any reply, and returns the replies
+// in order, each as Do would. A command a read-only client may not send fails the
+// whole call before anything is sent. A redis error reply fails the call at that
+// command; the connection is not usable afterwards.
+func (c *Redis) Pipeline(cmds [][]string) ([]any, error) {
+	var b strings.Builder
+	for _, args := range cmds {
+		if c.readOnly && !readOnlyCommands[strings.ToUpper(args[0])] {
+			return nil, fmt.Errorf("refusing to send %s to a read-only redis connection", strings.ToUpper(args[0]))
+		}
+		fmt.Fprintf(&b, "*%d\r\n", len(args))
+		for _, a := range args {
+			fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+		}
 	}
 	c.conn.SetDeadline(time.Now().Add(commandTimeout))
-	var b strings.Builder
-	fmt.Fprintf(&b, "*%d\r\n", len(args))
-	for _, a := range args {
-		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
-	}
 	if _, err := io.WriteString(c.conn, b.String()); err != nil {
-		return nil, fmt.Errorf("send %s: %w", strings.ToUpper(args[0]), err)
+		return nil, fmt.Errorf("send %s: %w", strings.ToUpper(cmds[0][0]), err)
 	}
-	reply, err := readReply(c.r)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", strings.ToUpper(args[0]), err)
+	replies := make([]any, len(cmds))
+	for i, args := range cmds {
+		c.conn.SetReadDeadline(time.Now().Add(commandTimeout))
+		var err error
+		if replies[i], err = readReply(c.r); err != nil {
+			return nil, fmt.Errorf("%s: %w", strings.ToUpper(args[0]), err)
+		}
 	}
-	return reply, nil
+	return replies, nil
 }
 
 func readReply(r *bufio.Reader) (any, error) {
@@ -189,29 +207,4 @@ func (c *Redis) Scan(cursor, pattern string) (string, []string, error) {
 		keys = append(keys, k)
 	}
 	return next, keys, nil
-}
-
-// Dump serializes a key; ok is false if the key no longer exists.
-func (c *Redis) Dump(key string) (payload string, ok bool, err error) {
-	reply, err := c.Do("DUMP", key)
-	if err != nil {
-		return "", false, err
-	}
-	s, ok := reply.(string)
-	return s, ok, nil
-}
-
-// PTTL returns the remaining time to live in milliseconds, 0 for a key that never expires.
-func (c *Redis) PTTL(key string) (int64, error) {
-	n, err := c.integer("PTTL", key)
-	if err != nil {
-		return 0, err
-	}
-	return max(n, 0), nil
-}
-
-// Restore writes a dumped key, replacing any existing one.
-func (c *Redis) Restore(key string, ttlMillis int64, payload string) error {
-	_, err := c.Do("RESTORE", key, strconv.FormatInt(ttlMillis, 10), payload, "REPLACE")
-	return err
 }

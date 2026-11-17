@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,14 +13,10 @@ import (
 )
 
 const (
-	learnUsage    = "learn spam|ham   (one message on stdin)"
-	maxLearnBytes = 32 << 20
-	learnTimeout  = 10 * time.Second
-	defaultRspamd = "http://rspamd:11334"
-	// Dovecot's Sieve pipe starts programs with a bare environment, so under it neither
-	// variable can be set: the defaults are what make `mailctl learn` work there.
-	defaultPasswordFile = "/run/secrets/rspamd-controller-password"
-	maxLearnErrText     = 200
+	learnUsage      = "learn --controller <url> --password-file <path> spam|ham   (one message on stdin)"
+	maxLearnBytes   = 32 << 20
+	learnTimeout    = 10 * time.Second
+	maxLearnErrText = 200
 )
 
 // refusals are rspamd answers to a message it will not train on. They are not
@@ -30,17 +27,19 @@ var refusals = []string{"already learned", "too few tokens", "less than", "not e
 // learn trains rspamd on one message from stdin through its controller. It needs
 // no state directory and never opens the store.
 func (e *env) learn(args []string) error {
-	if len(args) != 1 || (args[0] != "spam" && args[0] != "ham") {
+	var controller, passwordFile string
+	fs := flag.NewFlagSet("learn", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&controller, "controller", "", "")
+	fs.StringVar(&passwordFile, "password-file", "", "")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil || controller == "" || passwordFile == "" || len(pos) != 1 || (pos[0] != "spam" && pos[0] != "ham") {
 		return usageError(learnUsage)
 	}
-	kind := args[0]
-	file := e.getenv("MAILCTL_RSPAMD_PASSWORD_FILE")
-	if file == "" {
-		file = defaultPasswordFile
-	}
-	pw, err := os.ReadFile(file)
+	kind := pos[0]
+	pw, err := os.ReadFile(passwordFile)
 	if err != nil {
-		return fmt.Errorf("read the rspamd controller password file (MAILCTL_RSPAMD_PASSWORD_FILE, default %s): %w", defaultPasswordFile, err)
+		return fmt.Errorf("read the rspamd controller password file: %w", err)
 	}
 	msg, err := io.ReadAll(io.LimitReader(e.stdin, maxLearnBytes+1))
 	if err != nil {
@@ -49,19 +48,15 @@ func (e *env) learn(args []string) error {
 	if len(msg) == 0 || len(msg) > maxLearnBytes {
 		return fmt.Errorf("expected one message of 1 to %d bytes on stdin", maxLearnBytes)
 	}
-	base := e.getenv("MAILCTL_RSPAMD_URL")
-	if base == "" {
-		base = defaultRspamd
-	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimSuffix(base, "/")+"/learn"+kind, bytes.NewReader(msg))
+	req, err := http.NewRequest(http.MethodPost, strings.TrimSuffix(controller, "/")+"/learn"+kind, bytes.NewReader(msg))
 	if err != nil {
-		return fmt.Errorf("MAILCTL_RSPAMD_URL is not a valid URL: %w", err)
+		return fmt.Errorf("--controller is not a valid URL: %w", err)
 	}
 	req.Header.Set("Password", strings.TrimSpace(string(pw)))
 	req.Header.Set("Content-Type", "message/rfc822")
 	resp, err := (&http.Client{Timeout: learnTimeout}).Do(req)
 	if err != nil {
-		return fmt.Errorf("reach rspamd's controller at %s: %w", base, err)
+		return fmt.Errorf("reach rspamd's controller at %s: %w", controller, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))

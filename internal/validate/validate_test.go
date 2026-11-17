@@ -143,6 +143,16 @@ func TestConsistency(t *testing.T) {
 		{"grant for missing mailbox", func(s *store.Snapshot) {
 			s.Grants = []store.Grant{{Mailbox: "ghost@example.test", Address: "x@example.test"}}
 		}, "no such mailbox"},
+		{"domain not normalised", func(s *store.Snapshot) { s.Domains = append(s.Domains, "Example.Net") }, "not normalised"},
+		{"invalid domain", func(s *store.Snapshot) { s.Domains = append(s.Domains, "localhost") }, "invalid domain"},
+		{"mailbox address not normalised", func(s *store.Snapshot) { s.Mailboxes[0].Address = "Alice@example.test" }, "not normalised"},
+		{"hash with another scheme", func(s *store.Snapshot) { s.Mailboxes[0].Hash = "{SSHA512}abc" }, "must start with {BLF-CRYPT}"},
+		{"hash with a colon", func(s *store.Snapshot) { s.Mailboxes[0].Hash = "{BLF-CRYPT}a:b" }, "no colon, whitespace or control"},
+		{"hash with a space", func(s *store.Snapshot) { s.Mailboxes[0].Hash = "{BLF-CRYPT}a b" }, "no colon, whitespace or control"},
+		{"hash with a newline", func(s *store.Snapshot) { s.Mailboxes[0].Hash = "{BLF-CRYPT}a\nb" }, "no colon, whitespace or control"},
+		{"name with a control character", func(s *store.Snapshot) { s.Mailboxes[0].Name = "Al\x00ice" }, "control character"},
+		{"name with a colon is fine", func(s *store.Snapshot) { s.Mailboxes[0].Name = "Alice: work" }, ""},
+		{"unknown state", func(s *store.Snapshot) { s.Mailboxes[0].State = "asleep" }, "unknown state"},
 		{"grant in unhosted domain", func(s *store.Snapshot) {
 			s.Grants = []store.Grant{{Mailbox: "alice@example.test", Address: "x@example.net"}}
 		}, "not a hosted domain"},
@@ -173,5 +183,14 @@ func TestHostedName(t *testing.T) {
 		if _, err := HostedName(bad); err == nil {
 			t.Errorf("HostedName(%q) accepted", bad)
 		}
+	}
+}
+
+func TestSamePassword(t *testing.T) {
+	if got, err := SamePassword("abc", "abc"); err != nil || got != "abc" {
+		t.Errorf("SamePassword = %q, %v", got, err)
+	}
+	if _, err := SamePassword("abc", "abd"); err == nil || err.Error() != "passwords do not match" {
+		t.Errorf("mismatch: %v", err)
 	}
 }
