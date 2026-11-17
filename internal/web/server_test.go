@@ -340,7 +340,7 @@ func TestSecurityHeadersAndReadOnlyPages(t *testing.T) {
 		for k, v := range map[string]string{
 			"Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
 			"X-Content-Type-Options":  "nosniff",
-			"Referrer-Policy":         "no-referrer",
+			"Referrer-Policy":         "same-origin",
 			"Cache-Control":           "no-store",
 		} {
 			if r.header.Get(k) != v {

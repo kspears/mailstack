@@ -109,7 +109,7 @@ func (s *server) guard(next http.Handler) http.Handler {
 		h := sw.Header()
 		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cache-Control", "no-store")
 
 		actor, err := s.id.Identify(r)
