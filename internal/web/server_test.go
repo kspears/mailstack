@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/kspears/mailstack/internal/access"
 	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/store"
@@ -147,7 +149,8 @@ func TestEveryRouteNeedsIdentity(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/"}, {"GET", "/mailboxes"}, {"GET", "/mailboxes/edit?address=a@example.test"}, {"GET", "/mailboxes/remove?address=a@example.test"},
 		{"POST", "/mailboxes/add"}, {"POST", "/mailboxes/password"}, {"POST", "/mailboxes/state"}, {"POST", "/mailboxes/remove"},
-		{"GET", "/aliases"}, {"POST", "/aliases/add"}, {"POST", "/aliases/remove"},
+		{"GET", "/aliases"}, {"GET", "/aliases/edit?address=a@example.test"}, {"POST", "/aliases/add"}, {"POST", "/aliases/targets"}, {"POST", "/aliases/remove"},
+		{"POST", "/sendas/add"}, {"POST", "/sendas/remove"},
 		{"GET", "/domains"}, {"GET", "/sendas"}, {"GET", "/log"},
 		{"GET", "/static/style.css"}, {"GET", "/static/nope.css"}, {"GET", "/no/such/page"},
 	} {
@@ -228,6 +231,22 @@ func TestAliasLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(r.body, "delivers to alice@example.test") {
 		t.Errorf("alias list lacks targets:\n%s", r.body)
+	}
+	if e := u.get("/aliases/edit?address=info@example.test"); !strings.Contains(e.body, `value="alice@example.test, bob@example.test"`) {
+		t.Errorf("edit page lacks current targets:\n%s", e.body)
+	}
+	r = u.post("/aliases/targets", url.Values{"address": {"info@example.test"}, "targets": {"bob@example.test"}})
+	wantFlash(t, r, "ok: alias info@example.test now delivers to bob@example.test")
+	if a := u.snapshot().Aliases; len(a) != 1 || !slices.Equal(a[0].Targets, []string{"bob@example.test"}) {
+		t.Fatalf("aliases after edit = %+v", a)
+	}
+	r = u.post("/aliases/targets", url.Values{"address": {"info@example.test"}, "targets": {""}})
+	wantFlash(t, r, "error: alias info@example.test needs at least one target")
+	if a := u.snapshot().Aliases; len(a) != 1 || len(a[0].Targets) != 1 {
+		t.Fatalf("a refused edit changed the alias: %+v", a)
+	}
+	if e := u.get("/aliases/edit?address=nobody@example.test"); e.code != http.StatusNotFound {
+		t.Errorf("edit of unknown alias: %d, want 404", e.code)
 	}
 	r = u.post("/aliases/remove", url.Values{"address": {"info@example.test"}})
 	wantFlash(t, r, "ok: removed alias info@example.test")
@@ -351,9 +370,6 @@ func TestSecurityHeadersAndReadOnlyPages(t *testing.T) {
 	if d := u.get("/domains"); !strings.Contains(d.body, "example.test") || !strings.Contains(d.body, "added from the command line") || strings.Contains(d.body, "<form") {
 		t.Errorf("domains page:\n%s", d.body)
 	}
-	if s := u.get("/sendas"); strings.Contains(s.body, "<form") {
-		t.Error("send-as page offers a form")
-	}
 }
 
 func TestBodyLimit(t *testing.T) {
@@ -374,5 +390,70 @@ func TestDevIdentifierServes(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mailboxes", nil))
 	if w.Code != http.StatusOK {
 		t.Errorf("status %d", w.Code)
+	}
+}
+
+func checkPassword(hash, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(strings.TrimPrefix(hash, "{BLF-CRYPT}")), []byte(password)) == nil
+}
+
+func TestSendAsLifecycle(t *testing.T) {
+	u := newUI(t)
+	if s := u.get("/sendas"); strings.Contains(s.body, "<form") {
+		t.Error("send-as page offers a form with no mailbox to grant to")
+	}
+	u.addAlice()
+	r := u.post("/sendas/add", url.Values{"mailbox": {"alice@example.test"}, "address": {"sales@example.test"}})
+	wantFlash(t, r, "ok: alice@example.test may now send as sales@example.test")
+	if g := u.snapshot().Grants; len(g) != 1 || g[0] != (store.Grant{Mailbox: "alice@example.test", Address: "sales@example.test"}) {
+		t.Fatalf("grants = %+v", g)
+	}
+	r = u.post("/sendas/add", url.Values{"mailbox": {"nobody@example.test"}, "address": {"sales@example.test"}})
+	wantFlash(t, r, "error: no mailbox nobody@example.test")
+	r = u.post("/sendas/remove", url.Values{"mailbox": {"alice@example.test"}, "address": {"sales@example.test"}})
+	wantFlash(t, r, "ok: alice@example.test may no longer send as sales@example.test")
+	if len(u.snapshot().Grants) != 0 {
+		t.Error("grant still present")
+	}
+}
+
+func TestGeneratedPasswordIsShownOnceAndWorks(t *testing.T) {
+	u := newUI(t)
+	generate := func(path string, form url.Values) string {
+		t.Helper()
+		form.Set("csrf", u.token())
+		form.Set("generate", "1")
+		r := u.do(http.MethodPost, path, form, nil)
+		if r.code != http.StatusOK || u.flash != nil || len(r.header.Values("Set-Cookie")) != 0 {
+			t.Fatalf("POST %s: status %d, cookies %q; want the password in the body only", path, r.code, r.header.Values("Set-Cookie"))
+		}
+		const marker = `<code class="secret">`
+		i := strings.Index(r.body, marker)
+		if i < 0 {
+			t.Fatalf("no generated password in:\n%s", r.body)
+		}
+		rest := r.body[i+len(marker):]
+		return rest[:strings.Index(rest, "<")]
+	}
+	hash := func() string { return u.snapshot().Mailboxes[0].Hash }
+
+	first := generate("/mailboxes/add", url.Values{"address": {"alice@example.test"}})
+	if len(first) != 23 || !checkPassword(hash(), first) {
+		t.Fatalf("generated password %q does not match the stored hash", first)
+	}
+	second := generate("/mailboxes/password", url.Values{"address": {"alice@example.test"}, "password": {"ignored when generating"}})
+	if second == first || !checkPassword(hash(), second) || checkPassword(hash(), first) {
+		t.Fatal("reset did not replace the password with a new generated one")
+	}
+	for _, p := range []string{"/mailboxes", "/mailboxes/edit?address=alice@example.test", "/log"} {
+		if strings.Contains(u.get(p).body, second) {
+			t.Errorf("%s shows the generated password again", p)
+		}
+	}
+
+	// A refused change shows no password at all.
+	form := url.Values{"address": {"nobody@example.test"}, "generate": {"1"}, "csrf": {u.token()}}
+	if r := u.do(http.MethodPost, "/mailboxes/password", form, nil); r.code != http.StatusSeeOther || strings.Contains(r.body, "secret") {
+		t.Errorf("failed generate: status %d body %q", r.code, r.body)
 	}
 }

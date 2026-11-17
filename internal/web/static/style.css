@@ -30,6 +30,7 @@ label { display: block; margin: .75rem 0 .25rem; font-weight: 600; }
 input, select, button, .button { width: 100%; min-height: 48px; padding: .6rem .75rem; font: inherit; border-radius: .5rem; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
 button, .button { display: block; margin-top: 1rem; background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; text-align: center; text-decoration: none; cursor: pointer; }
 button.danger, .button.danger { background: var(--danger); border-color: var(--danger); color: var(--bg); }
-.button.plain { background: transparent; color: var(--fg); border-color: var(--line); }
+button.plain, .button.plain { background: transparent; color: var(--fg); border-color: var(--line); }
 table { width: 100%; border-collapse: collapse; }
 td, th { text-align: left; padding: .5rem .25rem; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+code.secret { font-size: 1.25rem; user-select: all; overflow-wrap: anywhere; color: var(--fg); }

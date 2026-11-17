@@ -1,4 +1,21 @@
 {{define "sendas"}}{{template "head" .}}
-{{range .Data}}<p class="card"><b>{{.Mailbox}}</b><br><span class="muted">may send as {{.Address}}</span></p>{{else}}<p>No send-as grants.</p>{{end}}
-<p>Send-as grants are managed from the command line (<code>mailctl sendas</code>).</p>
+{{range .Data.Grants}}<form class="card" method="post" action="/sendas/remove">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="mailbox" value="{{.Mailbox}}">
+<input type="hidden" name="address" value="{{.Address}}">
+<b>{{.Mailbox}}</b>
+<small class="muted">may send as {{.Address}}</small>
+<button class="danger" type="submit">Remove grant</button>
+</form>
+{{else}}<p>No send-as grants.</p>{{end}}
+<h2>Add a send-as grant</h2>
+{{if .Data.Mailboxes}}<form class="card" method="post" action="/sendas/add">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="g-mailbox">Mailbox</label>
+<select id="g-mailbox" name="mailbox">{{range .Data.Mailboxes}}<option value="{{.Address}}">{{.Address}}</option>{{end}}</select>
+<label for="g-address">May send as</label>
+<input id="g-address" name="address" type="email" autocapitalize="none" autocomplete="off" required>
+<p class="muted">A mailbox can always send as itself. A grant lets it also send as another address, such as an alias.</p>
+<button type="submit">Add grant</button>
+</form>{{else}}<p>Add a mailbox first.</p>{{end}}
 {{template "foot" .}}{{end}}

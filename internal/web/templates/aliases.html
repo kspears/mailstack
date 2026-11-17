@@ -1,11 +1,5 @@
 {{define "aliases"}}{{template "head" .}}
-{{range .Data}}<form class="card" method="post" action="/aliases/remove">
-<input type="hidden" name="csrf" value="{{$.CSRF}}">
-<input type="hidden" name="address" value="{{.Address}}">
-<b>{{.Address}}</b>
-<small class="muted">delivers to {{range $i, $t := .Targets}}{{if $i}}, {{end}}{{$t}}{{end}}</small>
-<button class="danger" type="submit">Remove {{.Address}}</button>
-</form>
+{{range .Data}}<a class="card row" href="/aliases/edit?address={{.Address}}"><b>{{.Address}}</b><small>delivers to {{join .Targets ", "}}</small></a>
 {{else}}<p>No aliases.</p>{{end}}
 <h2>Add an alias</h2>
 <form class="card" method="post" action="/aliases/add">

@@ -159,14 +159,9 @@ func (a *Admin) AddAlias(actor, address string, targets []string) (string, error
 	if err != nil {
 		return "", err
 	}
-	norm := make([]string, len(targets))
-	for i, t := range targets {
-		if norm[i], err = validate.Address(t); err != nil {
-			return "", err
-		}
-	}
-	if len(norm) == 0 {
-		return "", fmt.Errorf("alias %s needs at least one target", addr)
+	norm, err := aliasTargets(addr, targets)
+	if err != nil {
+		return "", err
 	}
 	return a.change(actor, func(tx *store.Tx, snap store.Snapshot) (change, error) {
 		if hasMailbox(snap, addr) {
@@ -181,6 +176,46 @@ func (a *Admin) AddAlias(actor, address string, targets []string) (string, error
 		list := strings.Join(norm, ",")
 		return change{"alias.add", addr + " -> " + list, fmt.Sprintf("added alias %s -> %s", addr, list)}, nil
 	})
+}
+
+// SetAliasTargets replaces an alias's targets in one change, so the address
+// never stops existing the way it would across a remove and an add.
+func (a *Admin) SetAliasTargets(actor, address string, targets []string) (string, error) {
+	addr, err := validate.Address(address)
+	if err != nil {
+		return "", err
+	}
+	norm, err := aliasTargets(addr, targets)
+	if err != nil {
+		return "", err
+	}
+	return a.change(actor, func(tx *store.Tx, snap store.Snapshot) (change, error) {
+		if !hasAlias(snap, addr) {
+			return change{}, fmt.Errorf("no alias %s", addr)
+		}
+		if err := tx.RemoveAlias(addr); err != nil {
+			return change{}, err
+		}
+		if err := tx.AddAlias(store.Alias{Address: addr, Targets: norm}); err != nil {
+			return change{}, err
+		}
+		list := strings.Join(norm, ",")
+		return change{"alias.set", addr + " -> " + list, fmt.Sprintf("alias %s now delivers to %s", addr, list)}, nil
+	})
+}
+
+func aliasTargets(alias string, targets []string) ([]string, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("alias %s needs at least one target", alias)
+	}
+	norm := make([]string, len(targets))
+	for i, t := range targets {
+		var err error
+		if norm[i], err = validate.Address(t); err != nil {
+			return nil, err
+		}
+	}
+	return norm, nil
 }
 
 func (a *Admin) RemoveAlias(actor, address string) (string, error) {

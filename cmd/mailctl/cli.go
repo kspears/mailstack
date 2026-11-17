@@ -31,7 +31,7 @@ type usageError string
 func (u usageError) Error() string { return "usage: mailctl " + string(u) }
 
 const usage = `mailctl mailbox list|add|passwd|state|remove ...
-       mailctl alias list|add|remove ...
+       mailctl alias list|add|set|remove ...
        mailctl sendas list|add|remove ...
        mailctl domain list|add|remove ...
        mailctl log | apply [--publish-empty] | serve | import-mailcow | learn --controller <url> --password-file <path> spam|ham | install-self <directory>`
@@ -181,7 +181,7 @@ func (e *env) mailbox(a *generate.Admin, args []string) error {
 }
 
 func (e *env) alias(a *generate.Admin, args []string) error {
-	const u = "alias list|add <address> <target>[,<target>...]|remove <address>"
+	const u = "alias list|add <address> <target>[,<target>...]|set <address> <target>[,<target>...]|remove <address>"
 	if len(args) == 0 {
 		return usageError(u)
 	}
@@ -195,6 +195,8 @@ func (e *env) alias(a *generate.Admin, args []string) error {
 		})
 	case args[0] == "add" && len(rest) == 2:
 		return e.ok(a.AddAlias(actor, rest[0], strings.Split(rest[1], ",")))
+	case args[0] == "set" && len(rest) == 2:
+		return e.ok(a.SetAliasTargets(actor, rest[0], strings.Split(rest[1], ",")))
 	case args[0] == "remove" && len(rest) == 1:
 		return e.ok(a.RemoveAlias(actor, rest[0]))
 	}

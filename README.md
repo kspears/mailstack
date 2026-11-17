@@ -144,6 +144,12 @@ just check    the CI gate
 `mailctl serve` runs the admin UI. Every request must carry a valid Cloudflare Access
 token for an allow-listed admin; there is no login page.
 
+The UI covers the routine work: add, disable and remove mailboxes, reset passwords, add
+aliases and change where they deliver, and manage send-as grants. Both password forms offer
+"Generate a password instead", which sets a random password and shows it once in the
+response; it is never stored in readable form or put in a cookie. Domains are added from the
+command line only.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAILCTL_LISTEN` | `:8080` | listen address |

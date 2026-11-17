@@ -62,7 +62,7 @@ func New(cfg Config) (http.Handler, error) {
 	if _, err := rand.Read(s.csrfKey); err != nil {
 		return nil, fmt.Errorf("generate CSRF key: %w", err)
 	}
-	t, err := template.New("").Funcs(template.FuncMap{"stamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 UTC") }}).ParseFS(templateFS, "templates/*.html")
+	t, err := template.New("").Funcs(template.FuncMap{"stamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 UTC") }, "join": strings.Join}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
@@ -84,10 +84,14 @@ func New(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("POST /mailboxes/state", s.mailboxState)
 	mux.HandleFunc("POST /mailboxes/remove", s.mailboxRemove)
 	mux.HandleFunc("GET /aliases", s.list("aliases", "Aliases", func(snap store.Snapshot) any { return snap.Aliases }))
+	mux.HandleFunc("GET /aliases/edit", s.aliasEdit)
 	mux.HandleFunc("POST /aliases/add", s.aliasAdd)
+	mux.HandleFunc("POST /aliases/targets", s.aliasTargets)
 	mux.HandleFunc("POST /aliases/remove", s.aliasRemove)
 	mux.HandleFunc("GET /domains", s.list("domains", "Domains", func(snap store.Snapshot) any { return snap.Domains }))
-	mux.HandleFunc("GET /sendas", s.list("sendas", "Send-as grants", func(snap store.Snapshot) any { return snap.Grants }))
+	mux.HandleFunc("GET /sendas", s.list("sendas", "Send-as grants", func(snap store.Snapshot) any { return snap }))
+	mux.HandleFunc("POST /sendas/add", s.sendAsAdd)
+	mux.HandleFunc("POST /sendas/remove", s.sendAsRemove)
 	mux.HandleFunc("GET /log", s.changeLog)
 	return s.guard(mux), nil
 }
@@ -150,11 +154,19 @@ func (s *server) checkPost(r *http.Request) error {
 	return nil
 }
 
-// do runs a change from a POST, then redirects to the page with the exact CLI line as a flash.
-func (s *server) do(w http.ResponseWriter, r *http.Request, back string, op func(actor string) (string, error)) {
-	if err := s.checkPost(r); err != nil {
+// permit answers 403 and reports false unless the POST passes checkPost.
+func (s *server) permit(w http.ResponseWriter, r *http.Request) bool {
+	err := s.checkPost(r)
+	if err != nil {
 		s.logf("refused %s %s: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "forbidden", http.StatusForbidden)
+	}
+	return err == nil
+}
+
+// do runs a change from a POST, then redirects to the page with the exact CLI line as a flash.
+func (s *server) do(w http.ResponseWriter, r *http.Request, back string, op func(actor string) (string, error)) {
+	if !s.permit(w, r) {
 		return
 	}
 	line := ""
@@ -163,6 +175,10 @@ func (s *server) do(w http.ResponseWriter, r *http.Request, back string, op func
 	} else {
 		line = "ok: " + summary
 	}
+	s.flash(w, r, back, line)
+}
+
+func (s *server) flash(w http.ResponseWriter, r *http.Request, back, line string) {
 	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: base64.RawURLEncoding.EncodeToString([]byte(line)), Path: "/", MaxAge: 60, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, back, http.StatusSeeOther)
 }
@@ -201,7 +217,7 @@ func (s *server) fail(w http.ResponseWriter, what string, err error) {
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 
-// list serves one of the read-only account pages: the template is name, which is
+// list serves one of the account list pages: the template is name, which is
 // also its nav entry, and pick chooses the rows.
 func (s *server) list(name, title string, pick func(store.Snapshot) any) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -244,23 +260,50 @@ func (s *server) mailboxRemoveConfirm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) mailboxAdd(w http.ResponseWriter, r *http.Request) {
-	s.do(w, r, "/mailboxes", func(actor string) (string, error) {
-		pw, err := samePassword(r)
-		if err != nil {
-			return "", err
-		}
+	s.withPassword(w, r, func(actor, pw string) (string, error) {
 		return s.admin.AddMailbox(actor, r.PostFormValue("address"), strings.TrimSpace(r.PostFormValue("name")), pw, false)
 	})
 }
 
 func (s *server) mailboxPassword(w http.ResponseWriter, r *http.Request) {
-	s.do(w, r, "/mailboxes", func(actor string) (string, error) {
-		pw, err := samePassword(r)
-		if err != nil {
-			return "", err
-		}
+	s.withPassword(w, r, func(actor, pw string) (string, error) {
 		return s.admin.SetPassword(actor, r.PostFormValue("address"), pw)
 	})
+}
+
+// withPassword runs a change that sets a password. The typed pair is used unless
+// the form's "generate" button was pressed; a generated password is shown once,
+// in the response to this POST, and is never put in a cookie or a redirect.
+func (s *server) withPassword(w http.ResponseWriter, r *http.Request, op func(actor, pw string) (string, error)) {
+	if !s.permit(w, r) {
+		return
+	}
+	generated := r.PostFormValue("generate") != ""
+	var pw string
+	var err error
+	if generated {
+		pw, err = newPassword(), nil
+	} else {
+		pw, err = samePassword(r)
+	}
+	var summary string
+	if err == nil {
+		summary, err = op(actorOf(r), pw)
+	}
+	switch {
+	case err != nil:
+		s.flash(w, r, "/mailboxes", "error: "+err.Error())
+	case generated:
+		s.render(w, r, "password_once", "mailboxes", "New password", struct{ Summary, Password string }{summary, pw})
+	default:
+		s.flash(w, r, "/mailboxes", "ok: "+summary)
+	}
+}
+
+// newPassword returns 100 random bits as four groups of five base32 characters.
+func newPassword() string {
+	t := strings.ToLower(rand.Text())
+	return t[0:5] + "-" + t[5:10] + "-" + t[10:15] + "-" + t[15:20]
 }
 
 func (s *server) mailboxState(w http.ResponseWriter, r *http.Request) {
@@ -279,16 +322,51 @@ func samePassword(r *http.Request) (string, error) {
 	return validate.SamePassword(r.PostFormValue("password"), r.PostFormValue("password2"))
 }
 
+func (s *server) aliasEdit(w http.ResponseWriter, r *http.Request) {
+	snap, err := s.admin.Snapshot()
+	if err != nil {
+		s.fail(w, "snapshot", err)
+		return
+	}
+	i := slices.IndexFunc(snap.Aliases, func(a store.Alias) bool { return a.Address == r.URL.Query().Get("address") })
+	if i < 0 {
+		http.NotFound(w, r)
+		return
+	}
+	s.render(w, r, "alias_edit", "aliases", snap.Aliases[i].Address, snap.Aliases[i])
+}
+
+func formTargets(r *http.Request) []string {
+	return strings.FieldsFunc(r.PostFormValue("targets"), func(c rune) bool { return c == ',' || c == ' ' || c == '\n' || c == '\r' || c == '\t' })
+}
+
 func (s *server) aliasAdd(w http.ResponseWriter, r *http.Request) {
 	s.do(w, r, "/aliases", func(actor string) (string, error) {
-		targets := strings.FieldsFunc(r.PostFormValue("targets"), func(c rune) bool { return c == ',' || c == ' ' || c == '\n' || c == '\r' || c == '\t' })
-		return s.admin.AddAlias(actor, r.PostFormValue("address"), targets)
+		return s.admin.AddAlias(actor, r.PostFormValue("address"), formTargets(r))
+	})
+}
+
+func (s *server) aliasTargets(w http.ResponseWriter, r *http.Request) {
+	s.do(w, r, "/aliases", func(actor string) (string, error) {
+		return s.admin.SetAliasTargets(actor, r.PostFormValue("address"), formTargets(r))
 	})
 }
 
 func (s *server) aliasRemove(w http.ResponseWriter, r *http.Request) {
 	s.do(w, r, "/aliases", func(actor string) (string, error) {
 		return s.admin.RemoveAlias(actor, r.PostFormValue("address"))
+	})
+}
+
+func (s *server) sendAsAdd(w http.ResponseWriter, r *http.Request) {
+	s.do(w, r, "/sendas", func(actor string) (string, error) {
+		return s.admin.AddSendAs(actor, r.PostFormValue("mailbox"), r.PostFormValue("address"))
+	})
+}
+
+func (s *server) sendAsRemove(w http.ResponseWriter, r *http.Request) {
+	s.do(w, r, "/sendas", func(actor string) (string, error) {
+		return s.admin.RemoveSendAs(actor, r.PostFormValue("mailbox"), r.PostFormValue("address"))
 	})
 }
 
