@@ -31,6 +31,4 @@ input, select, button, .button { width: 100%; min-height: 48px; padding: .6rem .
 button, .button { display: block; margin-top: 1rem; background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; text-align: center; text-decoration: none; cursor: pointer; }
 button.danger, .button.danger { background: var(--danger); border-color: var(--danger); color: var(--bg); }
 button.plain, .button.plain { background: transparent; color: var(--fg); border-color: var(--line); }
-table { width: 100%; border-collapse: collapse; }
-td, th { text-align: left; padding: .5rem .25rem; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
 code.secret { font-size: 1.25rem; user-select: all; overflow-wrap: anywhere; color: var(--fg); }
