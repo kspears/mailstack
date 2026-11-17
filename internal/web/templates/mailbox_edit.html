@@ -1,0 +1,25 @@
+{{define "mailbox_edit"}}{{template "head" .}}
+{{with .Data}}<p>{{.State}}{{if .Name}} - {{.Name}}{{end}}</p>
+<h2>Reset password</h2>
+<form class="card" method="post" action="/mailboxes/password">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="address" value="{{.Address}}">
+<label for="p-pw">New password</label>
+<input id="p-pw" name="password" type="password" autocomplete="new-password" required>
+<label for="p-pw2">New password again</label>
+<input id="p-pw2" name="password2" type="password" autocomplete="new-password" required>
+<button type="submit">Reset password</button>
+</form>
+<h2>Login state</h2>
+<form class="card" method="post" action="/mailboxes/state">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="address" value="{{.Address}}">
+<label for="s-state">State</label>
+<select id="s-state" name="state">{{$cur := .State}}{{range .States}}<option value="{{.}}"{{if eq . $cur}} selected{{end}}>{{.}}</option>{{end}}</select>
+<p class="muted">Receive-only delivers mail but cannot log in.</p>
+<button type="submit">Change state</button>
+</form>
+<a class="button danger" href="/mailboxes/remove?address={{.Address}}">Remove mailbox...</a>
+{{end}}
+<a class="button plain" href="/mailboxes">Back to mailboxes</a>
+{{template "foot" .}}{{end}}

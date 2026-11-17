@@ -1,0 +1,17 @@
+{{define "mailboxes"}}{{template "head" .}}
+{{range .Data}}<a class="card row" href="/mailboxes/edit?address={{.Address}}"><b>{{.Address}}</b><small>{{.State}}{{if .Name}} - {{.Name}}{{end}}</small></a>
+{{else}}<p>No mailboxes.</p>{{end}}
+<h2>Add a mailbox</h2>
+<form class="card" method="post" action="/mailboxes/add">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="a-address">Address</label>
+<input id="a-address" name="address" type="email" autocapitalize="none" autocomplete="off" required>
+<label for="a-name">Display name</label>
+<input id="a-name" name="name" autocomplete="off">
+<label for="a-pw">Password</label>
+<input id="a-pw" name="password" type="password" autocomplete="new-password" required>
+<label for="a-pw2">Password again</label>
+<input id="a-pw2" name="password2" type="password" autocomplete="new-password" required>
+<button type="submit">Add mailbox</button>
+</form>
+{{template "foot" .}}{{end}}

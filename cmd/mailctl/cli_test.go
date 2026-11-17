@@ -47,7 +47,7 @@ func TestCLI(t *testing.T) {
 		{"remove mailbox", []string{"alias", "remove", "info@example.test"}, "", 0, "ok: removed alias info@example.test\n", "", false},
 		{"remove mailbox keeps mail", []string{"mailbox", "remove", "bob@example.test"}, "", 0, "ok: removed bob@example.test; mail left in place at " + filepath.Join(mail, "example.test", "bob") + "\n", "", false},
 		{"apply", []string{"apply"}, "", 0, "ok: applied current account set\n", "", false},
-		{"serve stub", []string{"serve"}, "", 1, "", "error: serve is not built yet\n", false},
+		{"serve needs access settings", []string{"serve"}, "", 1, "", "error: MAILCTL_ACCESS_TEAM_DOMAIN is not set", false},
 		{"unknown command", []string{"frobnicate"}, "", 2, "", "error: usage: mailctl ", false},
 		{"mailbox list", []string{"mailbox", "list"}, "", 0, "alice@example.test  active  Alice A\n", "", false},
 		{"alias list", []string{"alias", "list"}, "", 0, "", "", false},

@@ -1,0 +1,4 @@
+{{define "sendas"}}{{template "head" .}}
+{{range .Data}}<p class="card"><b>{{.Mailbox}}</b><br><span class="muted">may send as {{.Address}}</span></p>{{else}}<p>No send-as grants.</p>{{end}}
+<p>Send-as grants are managed from the command line (<code>mailctl sendas</code>).</p>
+{{template "foot" .}}{{end}}
