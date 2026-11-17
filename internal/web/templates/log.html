@@ -1,6 +1,6 @@
 {{define "log"}}{{template "head" .}}
 {{if .Data}}<div class="scroll"><table>
 <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Subject</th></tr></thead>
-<tbody>{{range .Data}}<tr><td>{{stamp .Time}}</td><td>{{.Actor}}</td><td>{{.Action}}</td><td>{{.Subject}}</td></tr>{{end}}</tbody>
+<tbody>{{range .Data}}<tr><td>{{stamp .Time}}</td><td>{{.Actor}}</td><td>{{.Action}}</td><td>{{soft .Subject}}</td></tr>{{end}}</tbody>
 </table></div>{{else}}<p>No changes yet.</p>{{end}}
 {{template "foot" .}}{{end}}

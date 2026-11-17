@@ -286,15 +286,17 @@ func TestCSRFRefusals(t *testing.T) {
 		form url.Values
 		mod  func(*http.Request)
 	}{
-		"foreign origin":           {good(), func(r *http.Request) { r.Header.Set("Origin", "https://evil.example.org") }},
-		"null origin":              {good(), func(r *http.Request) { r.Header.Set("Origin", "null") }},
-		"foreign referer":          {good(), func(r *http.Request) { r.Header.Del("Origin"); r.Header.Set("Referer", "https://evil.example.org/x") }},
-		"no origin/referer":        {good(), func(r *http.Request) { r.Header.Del("Origin") }},
-		"cross-site fetch":         {good(), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }},
-		"same-site fetch":          {good(), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") }},
-		"missing token":            {url.Values{"address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
-		"wrong token":              {url.Values{"csrf": {"deadbeef"}, "address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
-		"another identity's token": {good(), func(r *http.Request) { r.Header.Set("X-Test-Actor", "other@example.test") }},
+		// Without fetch metadata the Origin, or failing that the Referer, must match.
+		"foreign origin":            {good(), noMeta(func(r *http.Request) { r.Header.Set("Origin", "https://evil.example.org") })},
+		"null origin":               {good(), noMeta(func(r *http.Request) { r.Header.Set("Origin", "null") })},
+		"foreign referer":           {good(), noMeta(func(r *http.Request) { r.Header.Del("Origin"); r.Header.Set("Referer", "https://evil.example.org/x") })},
+		"no origin/referer":         {good(), noMeta(func(r *http.Request) { r.Header.Del("Origin") })},
+		"user-initiated, no origin": {good(), func(r *http.Request) { r.Header.Del("Origin"); r.Header.Set("Sec-Fetch-Site", "none") }},
+		"cross-site fetch":          {good(), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }},
+		"same-site fetch":           {good(), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") }},
+		"missing token":             {url.Values{"address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
+		"wrong token":               {url.Values{"csrf": {"deadbeef"}, "address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
+		"another identity's token":  {good(), func(r *http.Request) { r.Header.Set("X-Test-Actor", "other@example.test") }},
 	} {
 		if r := u.do(http.MethodPost, "/mailboxes/add", tc.form, tc.mod); r.code != http.StatusForbidden {
 			t.Errorf("%s: status %d, want 403", name, r.code)
@@ -303,12 +305,31 @@ func TestCSRFRefusals(t *testing.T) {
 	if len(u.snapshot().Mailboxes) != 0 {
 		t.Error("a refused request created a mailbox")
 	}
-	okForm := good()
-	if r := u.do(http.MethodPost, "/mailboxes/add", okForm, func(r *http.Request) {
-		r.Header.Del("Origin")
-		r.Header.Set("Referer", "https://mail.example.test/mailboxes")
-	}); r.code != http.StatusSeeOther {
-		t.Errorf("same-origin Referer: status %d, want 303", r.code)
+	// What real browsers send. The second is a same-origin form under a strict referrer
+	// policy: no usable Origin, but the browser's own word that it is same-origin.
+	for name, mod := range map[string]func(*http.Request){
+		"same-origin Referer, no metadata": noMeta(func(r *http.Request) {
+			r.Header.Del("Origin")
+			r.Header.Set("Referer", "https://mail.example.test/mailboxes")
+		}),
+		"null Origin with same-origin metadata": func(r *http.Request) { r.Header.Set("Origin", "null") },
+	} {
+		form := good()
+		form.Set("address", strings.ReplaceAll(strings.Fields(name)[0], "-", "")+"@example.test")
+		if r := u.do(http.MethodPost, "/mailboxes/add", form, mod); r.code != http.StatusSeeOther {
+			t.Errorf("%s: status %d, want 303", name, r.code)
+		}
+	}
+	if n := len(u.snapshot().Mailboxes); n != 2 {
+		t.Errorf("accepted posts created %d mailboxes, want 2", n)
+	}
+}
+
+// noMeta makes a request look like one from a browser that sends no fetch metadata.
+func noMeta(mod func(*http.Request)) func(*http.Request) {
+	return func(r *http.Request) {
+		r.Header.Del("Sec-Fetch-Site")
+		mod(r)
 	}
 }
 
@@ -394,7 +415,7 @@ func TestDevIdentifierServes(t *testing.T) {
 }
 
 func checkPassword(hash, password string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(strings.TrimPrefix(hash, "{BLF-CRYPT}")), []byte(password)) == nil
+	return bcrypt.CompareHashAndPassword([]byte(strings.TrimPrefix(hash, store.HashPrefix)), []byte(password)) == nil
 }
 
 func TestSendAsLifecycle(t *testing.T) {

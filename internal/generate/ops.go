@@ -209,8 +209,8 @@ func aliasTargets(alias string, targets []string) ([]string, error) {
 		return nil, fmt.Errorf("alias %s needs at least one target", alias)
 	}
 	norm := make([]string, len(targets))
+	var err error
 	for i, t := range targets {
-		var err error
 		if norm[i], err = validate.Address(t); err != nil {
 			return nil, err
 		}

@@ -62,7 +62,9 @@ func New(cfg Config) (http.Handler, error) {
 	if _, err := rand.Read(s.csrfKey); err != nil {
 		return nil, fmt.Errorf("generate CSRF key: %w", err)
 	}
-	t, err := template.New("").Funcs(template.FuncMap{"stamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") }, "join": strings.Join}).ParseFS(templateFS, "templates/*.html")
+	t, err := template.New("").Funcs(template.FuncMap{"stamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") }, "join": strings.Join,
+		// soft lets a comma-joined target list wrap between addresses instead of inside one.
+		"soft": func(s string) string { return strings.ReplaceAll(s, ",", ",\u200b") }}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
@@ -137,13 +139,20 @@ func (s *server) token(actor string) string {
 
 // checkPost enforces same-origin and the per-identity token, then parses the form.
 func (s *server) checkPost(r *http.Request) error {
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+	// Sec-Fetch-Site is set by the browser and cannot be forged by a page, so
+	// "same-origin" settles it. Origin and Referer are the fallback for a browser
+	// that sends no fetch metadata; they are not required alongside it, because a
+	// browser under a strict referrer policy sends "Origin: null" on its own forms.
+	switch site := r.Header.Get("Sec-Fetch-Site"); site {
+	case "same-origin":
+	case "", "none":
+		source := cmp.Or(r.Header.Get("Origin"), r.Header.Get("Referer"))
+		u, err := url.Parse(source)
+		if source == "" || err != nil || u.Host != r.Host {
+			return fmt.Errorf("origin does not match host %q", r.Host)
+		}
+	default:
 		return fmt.Errorf("Sec-Fetch-Site is %q", site)
-	}
-	source := cmp.Or(r.Header.Get("Origin"), r.Header.Get("Referer"))
-	u, err := url.Parse(source)
-	if source == "" || err != nil || u.Host != r.Host {
-		return fmt.Errorf("origin does not match host %q", r.Host)
 	}
 	if err := r.ParseForm(); err != nil {
 		return fmt.Errorf("read form: %w", err)
@@ -166,9 +175,13 @@ func (s *server) permit(w http.ResponseWriter, r *http.Request) bool {
 
 // do runs a change from a POST, then redirects to the page with the exact CLI line as a flash.
 func (s *server) do(w http.ResponseWriter, r *http.Request, back string, op func(actor string) (string, error)) {
-	if !s.permit(w, r) {
-		return
+	if s.permit(w, r) {
+		s.finish(w, r, back, op)
 	}
+}
+
+// finish runs an already-permitted change and redirects with its result as a flash.
+func (s *server) finish(w http.ResponseWriter, r *http.Request, back string, op func(actor string) (string, error)) {
 	line := ""
 	if summary, err := op(actorOf(r)); err != nil {
 		line = "error: " + err.Error()
@@ -230,18 +243,26 @@ func (s *server) list(name, title string, pick func(store.Snapshot) any) http.Ha
 	}
 }
 
-func (s *server) mailbox(w http.ResponseWriter, r *http.Request) (store.Mailbox, bool) {
+// find answers the request itself (500 or 404) and reports false unless pick's
+// rows hold the one whose address is the ?address= query parameter.
+func find[T any](s *server, w http.ResponseWriter, r *http.Request, pick func(store.Snapshot) []T, address func(T) string) (T, bool) {
+	var zero T
 	snap, err := s.admin.Snapshot()
 	if err != nil {
 		s.fail(w, "snapshot", err)
-		return store.Mailbox{}, false
+		return zero, false
 	}
-	i := slices.IndexFunc(snap.Mailboxes, func(m store.Mailbox) bool { return m.Address == r.URL.Query().Get("address") })
+	rows := pick(snap)
+	i := slices.IndexFunc(rows, func(row T) bool { return address(row) == r.URL.Query().Get("address") })
 	if i < 0 {
 		http.NotFound(w, r)
-		return store.Mailbox{}, false
+		return zero, false
 	}
-	return snap.Mailboxes[i], true
+	return rows[i], true
+}
+
+func (s *server) mailbox(w http.ResponseWriter, r *http.Request) (store.Mailbox, bool) {
+	return find(s, w, r, func(snap store.Snapshot) []store.Mailbox { return snap.Mailboxes }, func(m store.Mailbox) string { return m.Address })
 }
 
 func (s *server) mailboxEdit(w http.ResponseWriter, r *http.Request) {
@@ -278,26 +299,23 @@ func (s *server) withPassword(w http.ResponseWriter, r *http.Request, op func(ac
 	if !s.permit(w, r) {
 		return
 	}
-	generated := r.PostFormValue("generate") != ""
-	var pw string
-	var err error
-	if generated {
-		pw, err = newPassword(), nil
-	} else {
-		pw, err = samePassword(r)
+	if r.PostFormValue("generate") == "" {
+		s.finish(w, r, "/mailboxes", func(actor string) (string, error) {
+			pw, err := samePassword(r)
+			if err != nil {
+				return "", err
+			}
+			return op(actor, pw)
+		})
+		return
 	}
-	var summary string
-	if err == nil {
-		summary, err = op(actorOf(r), pw)
-	}
-	switch {
-	case err != nil:
+	pw := newPassword()
+	summary, err := op(actorOf(r), pw)
+	if err != nil {
 		s.flash(w, r, "/mailboxes", "error: "+err.Error())
-	case generated:
-		s.render(w, r, "password_once", "mailboxes", "New password", struct{ Summary, Password string }{summary, pw})
-	default:
-		s.flash(w, r, "/mailboxes", "ok: "+summary)
+		return
 	}
+	s.render(w, r, "password_once", "mailboxes", "New password", struct{ Summary, Password string }{summary, pw})
 }
 
 // newPassword returns 100 random bits as four groups of five base32 characters.
@@ -323,17 +341,10 @@ func samePassword(r *http.Request) (string, error) {
 }
 
 func (s *server) aliasEdit(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.admin.Snapshot()
-	if err != nil {
-		s.fail(w, "snapshot", err)
-		return
+	a, ok := find(s, w, r, func(snap store.Snapshot) []store.Alias { return snap.Aliases }, func(a store.Alias) string { return a.Address })
+	if ok {
+		s.render(w, r, "alias_edit", "aliases", a.Address, a)
 	}
-	i := slices.IndexFunc(snap.Aliases, func(a store.Alias) bool { return a.Address == r.URL.Query().Get("address") })
-	if i < 0 {
-		http.NotFound(w, r)
-		return
-	}
-	s.render(w, r, "alias_edit", "aliases", snap.Aliases[i].Address, snap.Aliases[i])
 }
 
 func formTargets(r *http.Request) []string {
