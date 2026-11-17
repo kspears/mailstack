@@ -51,6 +51,21 @@ generations/status          written by the postfix watcher: which set it last ch
 4. On success, move `current` to the new generation and commit. On failure or timeout,
    drop `pending`, roll back, and print `error: ...`. Nothing changes.
 
+`status` is one line: `<generation id> ok` or `<generation id> error <message>`. The
+watcher writes it after checking the generation `pending` points at; `mailctl` ignores a
+`status` that names a different generation. Generation ids look like
+`20261117T120000.000000Z-1a2b3c4d` (UTC time, then a content hash). The last 10 are kept.
+
+## Environment
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAILCTL_STATE` | `/data/mailstack` | state directory |
+| `MAILCTL_MAIL_ROOT` | `/var/vmail` | mail lives in `<root>/<domain>/<localpart>` |
+| `MAILCTL_MAIL_UID`, `MAILCTL_MAIL_GID` | `5000` | owner written to `dovecot/users` |
+| `MAILCTL_APPLY_TIMEOUT` | `30s` | how long to wait for the watcher's `status` |
+| `MAILCTL_WATCHER` | unset | `off` skips the wait (tests, first bootstrap) |
+
 ## Development
 
 ```
