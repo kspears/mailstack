@@ -72,3 +72,65 @@ watcher writes it after checking the generation `pending` points at; `mailctl` i
 just          list recipes
 just check    the CI gate
 ```
+
+## Web UI
+
+`mailctl serve` runs the admin UI. Every request must carry a valid Cloudflare Access
+token for an allow-listed admin; there is no login page.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAILCTL_LISTEN` | `:8080` | listen address |
+| `MAILCTL_ACCESS_TEAM_DOMAIN` | required | Access team domain, for example `example.cloudflareaccess.com` |
+| `MAILCTL_ACCESS_AUD` | required | audience tag of the Access application |
+| `MAILCTL_ADMINS` | required | comma-separated emails allowed in; each change is logged under the signed-in email |
+| `MAILCTL_DEV_IDENTITY` | unset | an email to act as, with no sign-in; refused unless `MAILCTL_LISTEN` is loopback (`127.0.0.1:`, `localhost:`, `[::1]:`) |
+
+## Importing from mailcow
+
+`mailctl import-mailcow` is a one-time export from a running mailcow-dockerized install. It
+reads mailcow's MySQL and Redis and changes nothing there: every SQL statement is a `SELECT`
+inside a read-only transaction, and the only Redis commands sent to mailcow are `AUTH`,
+`HGETALL`, `HLEN`, `SCAN`, `DUMP` and `PTTL`.
+
+```
+mailctl import-mailcow [--dry-run] [--overwrite] [--skip-mailbox <address>]...
+                       [--acknowledge <item>[,<item>...]] [--bayes [--bayes-pattern <glob>]...]
+```
+
+| Variable | Meaning |
+|---|---|
+| `MAILCOW_MYSQL_DSN` | go-sql-driver DSN for mailcow's MySQL |
+| `MAILCOW_REDIS_ADDR`, `MAILCOW_REDIS_PASSWORD` | mailcow's Redis |
+| `MAILSTACK_REDIS_ADDR`, `MAILSTACK_REDIS_PASSWORD` | destination Redis, needed only with `--bayes` |
+| `MAILCTL_DKIM_DIR` | where DKIM key files go; default `<state>/dkim` |
+| `MAILSTACK_RELAY_HOST` | the new relay as mailcow writes it, e.g. `[smtp.example.test]:2587`; relayhost rows equal to it are dropped as redundant |
+
+Settings come from the environment only and are never printed.
+
+It carries domains, active mailboxes (password hashes stored verbatim; mailcow's receive-only
+state becomes `receive-only`), aliases (mailcow's own per-mailbox row is not an alias),
+explicit send-as grants, and one DKIM key file per domain, `<domain>.<selector>.key`, mode
+`0600`. Mailboxes that are disabled in mailcow are not carried and must each be named with
+`--skip-mailbox`. Every carried hash must be `{BLF-CRYPT}`; anything else stops the run.
+
+It counts everything in mailcow that can change mail behaviour and has no destination here:
+alias domains, catch-all aliases, special alias targets (`null@localhost` and similar), BCC,
+recipient and transport maps, relayhosts that differ from `MAILSTACK_RELAY_HOST`, temporary
+aliases, sync jobs, forwarding hosts, domain footers, Sieve filters, per-mailbox protocol
+restrictions, spam settings, rate limits, app passwords, two-factor entries, inactive aliases
+and external send-as grants. All counts are printed first; the first non-zero one that is not
+acknowledged fails the run with `error: <item> has <n> rows and no destination` and nothing is
+written. `--acknowledge` leaves named items behind on purpose, except `alias-domains`,
+`catch-all-aliases` and `special-alias-targets`, which change where mail goes and can never
+be acknowledged. Items that live in files on disk (global rspamd maps, user Sieve scripts,
+shared-folder ACLs) cannot be seen from the database; the output says `not checked:` for each.
+
+`--bayes` copies rspamd's statistics (`BAYES_*`, `RS*`, `learned_ids*`; override with
+`--bayes-pattern`) with `DUMP` and `RESTORE ... REPLACE`, keeping TTLs. Nothing is deleted.
+
+The import refuses to run if `<state>/store.db` already holds a domain, mailbox or alias,
+unless `--overwrite`, which first renames the old file to `store.db.replaced-<timestamp>`; it
+also lets existing DKIM key files be replaced. `--dry-run` does every read and check and
+writes nothing. The store is imported before key files are moved into place; if that last
+move fails the output says so and where the staged keys are.
