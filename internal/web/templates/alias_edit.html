@@ -1,0 +1,18 @@
+{{define "alias_edit"}}{{template "head" .}}
+{{with .Data}}<h2>Deliver to</h2>
+<form class="card" method="post" action="/aliases/targets">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="address" value="{{.Address}}">
+<label for="t-targets">Deliver to (comma-separated)</label>
+<input id="t-targets" name="targets" value="{{join .Targets ", "}}" autocapitalize="none" autocomplete="off" required>
+<p class="muted">The change takes effect in one step; the alias keeps working throughout.</p>
+<button type="submit">Save targets</button>
+</form>
+<form method="post" action="/aliases/remove">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="address" value="{{.Address}}">
+<button class="danger" type="submit">Remove {{.Address}}</button>
+</form>
+{{end}}
+<a class="button plain" href="/aliases">Back to aliases</a>
+{{template "foot" .}}{{end}}

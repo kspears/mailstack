@@ -1,0 +1,24 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - mailctl</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header><nav>
+<a href="/mailboxes"{{if eq .Nav "mailboxes"}} aria-current="page"{{end}}>Mailboxes</a>
+<a href="/aliases"{{if eq .Nav "aliases"}} aria-current="page"{{end}}>Aliases</a>
+<a href="/domains"{{if eq .Nav "domains"}} aria-current="page"{{end}}>Domains</a>
+<a href="/sendas"{{if eq .Nav "sendas"}} aria-current="page"{{end}}>Send-as</a>
+<a href="/log"{{if eq .Nav "log"}} aria-current="page"{{end}}>Log</a>
+</nav></header>
+<main>
+<h1>{{.Title}}</h1>
+{{if .Flash}}<p class="flash {{if .IsErr}}error{{else}}ok{{end}}" role="status">{{.Flash}}</p>{{end}}
+{{end}}
+{{define "foot"}}</main>
+</body>
+</html>
+{{end}}

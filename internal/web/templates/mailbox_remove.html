@@ -1,0 +1,9 @@
+{{define "mailbox_remove"}}{{template "head" .}}
+{{with .Data}}<form class="card" method="post" action="/mailboxes/remove">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="address" value="{{.Address}}">
+<p>Remove <b>{{.Address}}</b>? The account and its send-as grants go away. Mail on disk is kept, not deleted.</p>
+<button class="danger" type="submit">Remove {{.Address}}</button>
+</form>
+<a class="button plain" href="/mailboxes/edit?address={{.Address}}">Cancel</a>{{end}}
+{{template "foot" .}}{{end}}
