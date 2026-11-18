@@ -2,7 +2,6 @@ package auth
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -20,26 +19,41 @@ import (
 // memory: losing them on a restart only means pressing the button again.
 type ceremony struct {
 	data    webauthn.SessionData
-	admin   string // set for registration and proof, empty for sign-in
+	admin   string // set for registration, empty for sign-in and proof
 	label   string
+	from    string
 	expires time.Time
 }
 
+// startCeremony keeps a challenge until it is answered. Beginning a sign-in
+// needs no session, so the table is bounded two ways: one visitor may hold
+// only a few, and when it is full the oldest gives way to the newest.
 func (s *Service) startCeremony(c ceremony) (string, error) {
 	now := s.cfg.Now()
 	c.expires = now.Add(ceremonyLife)
 	id, _ := newToken()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var held int
+	var oldest string
 	for k, old := range s.ceremonies {
 		if !now.Before(old.expires) {
 			delete(s.ceremonies, k)
+			continue
+		}
+		if old.from == c.from {
+			held++
+		}
+		if oldest == "" || old.expires.Before(s.ceremonies[oldest].expires) {
+			oldest = k
 		}
 	}
-	// Beginning a sign-in needs no session, so the map must not grow without
-	// bound under a flood of them.
+	if held >= maxCeremoniesPerVisitor {
+		s.cfg.Logf("sign-in failed from=%s: too many passkey challenges requested", c.from)
+		return "", Problem("too many passkey requests; wait a few minutes and try again")
+	}
 	if len(s.ceremonies) >= maxCeremonies {
-		return "", errors.New("too many passkey requests in progress; try again in a few minutes")
+		delete(s.ceremonies, oldest)
 	}
 	s.ceremonies[id] = c
 	return id, nil
@@ -109,7 +123,7 @@ func cleanLabel(label string) string {
 
 // BeginPasskey starts adding a passkey to the session's admin. The options go
 // to the browser as JSON; the id comes back with the answer.
-func (s *Service) BeginPasskey(sess store.Session, label string) (options any, id string, err error) {
+func (s *Service) BeginPasskey(from string, sess store.Session, label string) (options any, id string, err error) {
 	if !s.Fresh(sess) {
 		return nil, "", errStale
 	}
@@ -128,7 +142,7 @@ func (s *Service) BeginPasskey(sess store.Session, label string) (options any, i
 	if err != nil {
 		return nil, "", err
 	}
-	id, err = s.startCeremony(ceremony{data: *data, admin: sess.Admin, label: cleanLabel(label)})
+	id, err = s.startCeremony(ceremony{data: *data, admin: sess.Admin, label: cleanLabel(label), from: from})
 	return creation, id, err
 }
 
@@ -136,7 +150,7 @@ func (s *Service) BeginPasskey(sess store.Session, label string) (options any, i
 func (s *Service) FinishPasskey(sess store.Session, id string, r *http.Request) error {
 	c, ok := s.takeCeremony(id)
 	if !ok || c.admin != sess.Admin {
-		return errors.New("that took too long; add the passkey again")
+		return Problem("that took too long; add the passkey again")
 	}
 	if !s.Fresh(sess) {
 		return errStale
@@ -148,10 +162,10 @@ func (s *Service) FinishPasskey(sess store.Session, id string, r *http.Request) 
 	credential, err := s.wa.FinishRegistration(u, c.data, r)
 	if err != nil {
 		s.cfg.Logf("passkey registration for %s: %v", sess.Admin, err)
-		return errors.New("the passkey could not be verified; nothing was added")
+		return Problem("the passkey could not be verified; nothing was added")
 	}
 	if !credential.Flags.UserVerified {
-		return errors.New("this passkey did not confirm who you are (no PIN or biometric); nothing was added")
+		return Problem("this passkey did not confirm who you are (no PIN or biometric); nothing was added")
 	}
 	record, err := json.Marshal(credential)
 	if err != nil {
@@ -164,9 +178,9 @@ func (s *Service) RemovePasskey(sess store.Session, id []byte) error {
 	if !s.Fresh(sess) {
 		return errStale
 	}
-	removed, err := s.st.RemovePasskey(s.cfg.Now(), sess.Admin, id)
+	removed, err := s.st.RemovePasskey(s.cfg.Now(), sess.Admin, id, sess.IDHash)
 	if err == nil && !removed {
-		err = errors.New("no such passkey")
+		err = Problem("no such passkey")
 	}
 	return err
 }
@@ -177,19 +191,19 @@ func (s *Service) Passkeys(sess store.Session) ([]store.Passkey, error) {
 
 // BeginPasskeySignIn issues a challenge that names no account, so it reveals
 // nothing about who has one.
-func (s *Service) BeginPasskeySignIn() (options any, id string, err error) {
+func (s *Service) BeginPasskeySignIn(from string) (options any, id string, err error) {
 	assertion, data, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		return nil, "", err
 	}
-	id, err = s.startCeremony(ceremony{data: *data})
+	id, err = s.startCeremony(ceremony{data: *data, from: from})
 	return assertion, id, err
 }
 
 // finishAssertion verifies a passkey answer and returns whose it is.
 func (s *Service) finishAssertion(from, what, id string, r *http.Request) (string, error) {
 	c, ok := s.takeCeremony(id)
-	if !ok {
+	if !ok || c.admin != "" {
 		s.cfg.Logf("%s failed from=%s: passkey challenge unknown or expired", what, from)
 		return "", ErrSignIn
 	}

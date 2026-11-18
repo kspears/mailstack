@@ -155,7 +155,7 @@ command line only.
 | `MAILCTL_LISTEN` | `:8080` | listen address |
 | `MAILCTL_ADMIN_HOST` | required | the hostname the UI is served on, for example `admin.example.test`; requests for any other host are refused, passkeys are bound to it, and enrolment links name it. The command line needs it too |
 | `MAILCTL_RSPAMD_HOST` | unset | the hostname rspamd's own UI is published on, if it is; see "The gate in front of rspamd" |
-| `MAILCTL_TRUSTED_PROXY` | unset | the proxy's IP address. Only a connection from exactly this address may say who the visitor is. One address, never a network |
+| `MAILCTL_TRUSTED_PROXY` | required | the proxy's IP address. Only a connection from exactly this address may say who the visitor is. One address, never a network. `serve` refuses to start without it, except under `MAILCTL_DEV=1`: every failed sign-in would otherwise be logged, and banned, under the proxy's own address |
 | `MAILCTL_CLIENT_ADDR_HEADER` | `X-Forwarded-For` | the header the proxy puts the visitor's address in; the last entry is used |
 | `MAILCTL_DEV` | unset | `1` serves over plain HTTP for local work: cookies lose `Secure` and the `__Host-` prefix. Refused unless `MAILCTL_LISTEN` is loopback (`127.0.0.1:`, `localhost:`, `[::1]:`) |
 
@@ -180,7 +180,8 @@ The link is valid for 24 hours and shown once; the store keeps only its hash. Op
 does not use it up, completing it does, and a newer link cancels an older one. Whoever
 completes it first holds the account, so send it by a channel you trust. Through it the
 admin sets a password and adds the account to an authenticator app; the operator never
-sees either. `reset` is also the way back in for a locked-out admin, and it needs no
+sees either. The authenticator key on the page belongs to the browser it is shown to:
+anything else that opens the link is shown a different key, which is never stored. `reset` is also the way back in for a locked-out admin, and it needs no
 sign-in: it works with the UI stopped.
 
 What the sign-in does and does not do:
@@ -190,11 +191,17 @@ What the sign-in does and does not do:
 - Ten right-password, wrong-code attempts in an hour stop password sign-in for that admin
   until the hour passes. Wrong passwords do not count toward that, so nobody can lock an
   admin out by guessing at their address. Passkey sign-in is never limited.
-- Guessing is slowed by address instead. Each failure is logged as one line starting
-  `sign-in failed from=<address>` (or `proof failed from=<address>`), which is what a
-  fail2ban filter should match.
+- Guessing is slowed by address instead. Each failure is logged as one line whose message
+  starts `sign-in failed from=<address>` (or `proof failed from=<address>`). A fail2ban
+  filter must anchor on that: the timestamp, then those words, at the start of the line,
+  as in `^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d (?:sign-in|proof) failed from=<HOST> `. Request
+  lines quote the path, so a visitor cannot make one read as a failure from someone else's
+  address, but an unanchored filter would still be matching text the visitor chose.
+- Every refused sign-in takes at least 750 ms, so the time taken does not say which check
+  refused it.
 - A session lasts 12 hours and is kept on the server, so signing out, a reset and a removal
-  end it at once.
+  end it at once. Changing the password, replacing the authenticator or removing a passkey
+  ends the admin's other sessions.
 - Changing a password, replacing the authenticator, and adding or removing a passkey need a
   proof given in the last 5 minutes: a passkey, or password and code again.
 - Every request that changes anything must carry `Sec-Fetch-Site: same-origin`, which only a

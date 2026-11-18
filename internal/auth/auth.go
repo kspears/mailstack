@@ -34,13 +34,27 @@ const (
 
 	bcryptCost     = 12
 	ceremonyLife   = 5 * time.Minute
-	maxCeremonies  = 1000
+	pendingLife    = 15 * time.Minute
 	maxLabelLength = 40
+	// Passkey challenges are kept in memory and anyone may ask for one, so
+	// they are capped per visitor, and the oldest go first when the whole
+	// table is full: a flood cannot fill it and lock the admins out.
+	maxCeremonies           = 1000
+	maxCeremoniesPerVisitor = 10
+	// Every refused sign-in takes at least this long, measured from its start,
+	// so the time taken does not say which check refused it.
+	failureFloor = 750 * time.Millisecond
 )
 
 // ErrSignIn is the one failure a caller may show. Why it failed is logged by
 // Service and never returned.
 var ErrSignIn = errors.New("Sign-in failed.")
+
+// A Problem is a mistake the person can correct, worded for them. Any other
+// error from this package is a fault and must not be shown.
+type Problem string
+
+func (p Problem) Error() string { return string(p) }
 
 // Config names the site. AdminHost is host[:port] as browsers send it.
 type Config struct {
@@ -51,6 +65,8 @@ type Config struct {
 	Now    func() time.Time
 	// BcryptCost is for tests, which hash hundreds of passwords; zero means 12.
 	BcryptCost int
+	// NoFailureDelay is for tests, which fail on purpose hundreds of times.
+	NoFailureDelay bool
 	// Logf receives one line per failed sign-in or proof. The visitor's address
 	// comes first so that a ban rule can anchor on it.
 	Logf func(format string, args ...any)
@@ -61,6 +77,10 @@ type Service struct {
 	cfg  Config
 	wa   *webauthn.WebAuthn
 	fake []byte
+
+	// codes serialises the count-then-record of wrong codes, so concurrent
+	// requests cannot each see nine failures and all be allowed a tenth.
+	codes sync.Mutex
 
 	mu         sync.Mutex
 	ceremonies map[string]ceremony
@@ -111,11 +131,11 @@ func Hash(token string) []byte {
 
 func (s *Service) hashPassword(a, b string) (string, error) {
 	pw, err := validate.SamePassword(a, b)
-	if err != nil {
-		return "", err
+	if err == nil {
+		err = validate.Password(pw)
 	}
-	if err := validate.Password(pw); err != nil {
-		return "", err
+	if err != nil {
+		return "", Problem(err.Error())
 	}
 	h, err := bcrypt.GenerateFromPassword([]byte(pw), s.cfg.BcryptCost)
 	return string(h), err
@@ -160,39 +180,92 @@ func noAdmin(err error, address string) error {
 
 func (s *Service) newEnrolment(address string) (string, error) {
 	token, hash := newToken()
-	secret := make([]byte, 20)
-	rand.Read(secret)
-	return token, s.st.NewEnrolment(address, hash, secret, s.cfg.Now().Add(EnrolmentLife))
+	return token, s.st.NewEnrolment(address, hash, s.cfg.Now().Add(EnrolmentLife))
 }
 
 // --- enrolment ---------------------------------------------------------------
 
-// Enrolment is what the enrolment page shows. Looking never uses the link up.
+// Enrolment is what the enrolment page shows.
 type Enrolment struct {
 	Address string
 	Secret  string // base32, for typing into an authenticator by hand
 	URI     string // for the QR code
 }
 
-func (s *Service) Enrolment(token string) (Enrolment, bool, error) {
-	address, secret, ok, err := s.st.Enrolment(Hash(token), s.cfg.Now())
-	if !ok || err != nil {
+func (s *Service) show(address string, secret []byte) Enrolment {
+	return Enrolment{address, secretEncoding.EncodeToString(secret), totpURI(s.cfg.AdminHost, address, secret)}
+}
+
+// pendingSecret is an authenticator key that has been shown but not yet
+// confirmed with a code. Until then it is nobody's second factor.
+type pendingSecret struct {
+	secret  []byte
+	expires time.Time
+}
+
+// offer returns the pending key under name, making one if there is none, so
+// that reloading a page does not invalidate the QR code already scanned.
+func (s *Service) offer(name string, fresh bool) []byte {
+	now := s.cfg.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, p := range s.pending {
+		if !now.Before(p.expires) {
+			delete(s.pending, k)
+		}
+	}
+	if p, ok := s.pending[name]; ok && !fresh {
+		return p.secret
+	}
+	secret := make([]byte, 20)
+	rand.Read(secret)
+	s.pending[name] = pendingSecret{secret, now.Add(pendingLife)}
+	return secret
+}
+
+func (s *Service) offered(name string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pending[name]
+	return p.secret, ok && s.cfg.Now().Before(p.expires)
+}
+
+func (s *Service) withdraw(name string) {
+	s.mu.Lock()
+	delete(s.pending, name)
+	s.mu.Unlock()
+}
+
+// enrolKey names the key offered to one browser for one link. The link alone
+// is not enough to learn it: whatever else saw the address of the link, a
+// preview bot or a log, is shown a different key that is never stored.
+func enrolKey(token, browser string) string {
+	return "enrol\x00" + string(Hash(token)) + "\x00" + browser
+}
+
+// Enrolment looks a link up for the browser identified by browser, a value
+// only that browser holds. Looking never uses the link up.
+func (s *Service) Enrolment(token, browser string) (Enrolment, bool, error) {
+	address, ok, err := s.st.Enrolment(Hash(token), s.cfg.Now())
+	if !ok || err != nil || browser == "" {
 		return Enrolment{}, false, err
 	}
-	return Enrolment{address, secretEncoding.EncodeToString(secret), totpURI(s.cfg.AdminHost, address, secret)}, true, nil
+	return s.show(address, s.offer(enrolKey(token, browser), false)), true, nil
 }
 
 // Enrol completes a link: it sets the password, confirms the authenticator
-// with one code, and signs the new admin in. An error whose text may be shown
-// is a mistake the person can correct; the link survives it.
-func (s *Service) Enrol(token, pw, pw2, code string) (session string, err error) {
+// with one code, and signs the new admin in. A Problem leaves the link usable.
+func (s *Service) Enrol(token, browser, pw, pw2, code string) (session string, err error) {
+	const gone = Problem("this enrolment link has been used, replaced or has expired; ask for a new one")
 	now := s.cfg.Now()
-	_, secret, ok, err := s.st.Enrolment(Hash(token), now)
-	if err != nil {
+	if _, ok, err := s.st.Enrolment(Hash(token), now); err != nil {
 		return "", err
+	} else if !ok {
+		return "", gone
 	}
+	secret, ok := s.offered(enrolKey(token, browser))
 	if !ok {
-		return "", errors.New("this enrolment link has been used, replaced or has expired; ask for a new one")
+		return "", Problem("this page was open too long; scan the code shown now and try again")
 	}
 	hash, err := s.hashPassword(pw, pw2)
 	if err != nil {
@@ -200,15 +273,16 @@ func (s *Service) Enrol(token, pw, pw2, code string) (session string, err error)
 	}
 	step, ok := totpMatch(secret, code, now)
 	if !ok {
-		return "", errors.New("that code does not match; check the authenticator app and the clock on this device")
+		return "", Problem("that code does not match; check the authenticator app and the clock on this device")
 	}
-	address, ok, err := s.st.CompleteEnrolment(now, Hash(token), hash, step)
+	address, ok, err := s.st.CompleteEnrolment(now, Hash(token), hash, secret, step)
 	if err != nil {
 		return "", err
 	}
 	if !ok {
-		return "", errors.New("this enrolment link has been used, replaced or has expired; ask for a new one")
+		return "", gone
 	}
+	s.withdraw(enrolKey(token, browser))
 	return s.newSession(address)
 }
 
@@ -226,6 +300,15 @@ func (s *Service) SignIn(from, address, password, code string) (session string, 
 }
 
 func (s *Service) checkPasswordAndCode(from, what, address, password, code string) (string, error) {
+	started := time.Now()
+	admin, err := s.passwordAndCode(from, what, address, password, code)
+	if err != nil && !s.cfg.NoFailureDelay {
+		time.Sleep(time.Until(started.Add(failureFloor)))
+	}
+	return admin, err
+}
+
+func (s *Service) passwordAndCode(from, what, address, password, code string) (string, error) {
 	now := s.cfg.Now()
 	refuse := func(why string) (string, error) {
 		s.cfg.Logf("%s failed from=%s address=%q: %s", what, from, address, why)
@@ -248,6 +331,8 @@ func (s *Service) checkPasswordAndCode(from, what, address, password, code strin
 	if !found || admin.Hash == "" || !passwordOK {
 		return refuse("wrong address or password")
 	}
+	s.codes.Lock()
+	defer s.codes.Unlock()
 	failures, err := s.st.CodeFailures(admin.Address, now.Add(-CodeFailureWindow))
 	if err != nil {
 		return "", err
@@ -314,7 +399,7 @@ func (s *Service) Prove(from string, sess store.Session, password, code string) 
 	return s.st.MarkProved(sess.IDHash, s.cfg.Now())
 }
 
-var errStale = errors.New("confirm it is you first")
+const errStale = Problem("confirm it is you first")
 
 func (s *Service) ChangePassword(sess store.Session, pw, pw2 string) error {
 	if !s.Fresh(sess) {
@@ -327,10 +412,7 @@ func (s *Service) ChangePassword(sess store.Session, pw, pw2 string) error {
 	return s.st.SetAdminPassword(s.cfg.Now(), sess.Admin, hash, sess.IDHash)
 }
 
-type pendingSecret struct {
-	secret  []byte
-	expires time.Time
-}
+func replaceKey(sess store.Session) string { return "replace\x00" + string(sess.IDHash) }
 
 // NewAuthenticator starts replacing the authenticator and returns what to
 // show. Nothing changes until ConfirmAuthenticator sees a code from it.
@@ -338,45 +420,36 @@ func (s *Service) NewAuthenticator(sess store.Session) (Enrolment, error) {
 	if !s.Fresh(sess) {
 		return Enrolment{}, errStale
 	}
-	secret := make([]byte, 20)
-	rand.Read(secret)
-	s.mu.Lock()
-	s.pending[string(sess.IDHash)] = pendingSecret{secret, s.cfg.Now().Add(ceremonyLife)}
-	s.mu.Unlock()
-	return Enrolment{sess.Admin, secretEncoding.EncodeToString(secret), totpURI(s.cfg.AdminHost, sess.Admin, secret)}, nil
+	return s.show(sess.Admin, s.offer(replaceKey(sess), true)), nil
 }
 
 // PendingAuthenticator is the replacement NewAuthenticator last started for
 // this session, for drawing its QR code.
 func (s *Service) PendingAuthenticator(sess store.Session) (Enrolment, bool) {
-	s.mu.Lock()
-	p, ok := s.pending[string(sess.IDHash)]
-	s.mu.Unlock()
-	if !ok || !s.cfg.Now().Before(p.expires) {
+	secret, ok := s.offered(replaceKey(sess))
+	if !ok {
 		return Enrolment{}, false
 	}
-	return Enrolment{sess.Admin, secretEncoding.EncodeToString(p.secret), totpURI(s.cfg.AdminHost, sess.Admin, p.secret)}, true
+	return s.show(sess.Admin, secret), true
 }
 
+// ConfirmAuthenticator makes the pending authenticator the admin's and ends
+// the admin's other sessions.
 func (s *Service) ConfirmAuthenticator(sess store.Session, code string) error {
 	if !s.Fresh(sess) {
 		return errStale
 	}
-	now := s.cfg.Now()
-	s.mu.Lock()
-	p, ok := s.pending[string(sess.IDHash)]
-	s.mu.Unlock()
-	if !ok || !now.Before(p.expires) {
-		return errors.New("that took too long; start replacing the authenticator again")
-	}
-	step, ok := totpMatch(p.secret, code, now)
+	secret, ok := s.offered(replaceKey(sess))
 	if !ok {
-		return errors.New("that code does not match the new authenticator; nothing was changed")
+		return Problem("that took too long; start replacing the authenticator again")
 	}
-	s.mu.Lock()
-	delete(s.pending, string(sess.IDHash))
-	s.mu.Unlock()
-	return s.st.SetAdminTOTP(now, sess.Admin, p.secret, step)
+	now := s.cfg.Now()
+	step, ok := totpMatch(secret, code, now)
+	if !ok {
+		return Problem("that code does not match the new authenticator; nothing was changed")
+	}
+	s.withdraw(replaceKey(sess))
+	return s.st.SetAdminTOTP(now, sess.Admin, secret, step, sess.IDHash)
 }
 
 // --- hand-off to the rspamd hostname -----------------------------------------

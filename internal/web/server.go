@@ -39,7 +39,7 @@ const (
 	// Only the pages that offer a passkey carry a script, and only from here.
 	cspScript = csp + "; script-src 'self'; connect-src 'self'"
 	// Only the pages that show an authenticator QR code carry an image.
-	cspImage = cspScript + "; img-src 'self'"
+	cspImage = csp + "; img-src 'self'"
 )
 
 // Config wires the server. Logf receives one line per request plus the reason
@@ -146,7 +146,7 @@ func (s *server) guard(next http.Handler) http.Handler {
 		r.Body = http.MaxBytesReader(sw, r.Body, maxBody)
 		switch {
 		case !s.hostAllowed(r):
-			s.logf("refused %s %s: host %q is not served here", r.Method, r.URL.Path, r.Host)
+			s.logf("refused %s %q: host %q is not served here", r.Method, r.URL.Path, r.Host)
 			http.Error(sw, "misdirected request", http.StatusMisdirectedRequest)
 		case signedIn:
 			next.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), ctxKey{}, sess)))
@@ -157,7 +157,10 @@ func (s *server) guard(next http.Handler) http.Handler {
 		default:
 			http.Error(sw, "forbidden", http.StatusForbidden)
 		}
-		s.logf("%s %s %d %s %s", r.Method, r.URL.Path, sw.status, actor, time.Since(start).Round(time.Millisecond))
+		// The path is the visitor's to choose, so it is quoted: it must not be able
+		// to start a line of its own, or to make this line read as a failed
+		// sign-in from an address of the visitor's choosing.
+		s.logf("%s %q %d %s %s", r.Method, r.URL.Path, sw.status, actor, time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -198,7 +201,7 @@ func (s *server) checkPost(r *http.Request) error {
 func (s *server) permit(w http.ResponseWriter, r *http.Request) bool {
 	err := s.checkPost(r)
 	if err != nil {
-		s.logf("refused %s %s: %v", r.Method, r.URL.Path, err)
+		s.logf("refused %s %q: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}
 	return err == nil

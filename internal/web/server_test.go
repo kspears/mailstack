@@ -62,11 +62,11 @@ func (u *ui) enrol(address string) (secret, session string) {
 	if err != nil {
 		u.t.Fatal(err)
 	}
-	e, ok, err := u.auth.Enrolment(token)
+	e, ok, err := u.auth.Enrolment(token, "the test's browser")
 	if err != nil || !ok {
 		u.t.Fatalf("enrolment link: %v %v", ok, err)
 	}
-	session, err = u.auth.Enrol(token, adminPw, adminPw, u.code(e.Secret))
+	session, err = u.auth.Enrol(token, "the test's browser", adminPw, adminPw, u.code(e.Secret))
 	if err != nil {
 		u.t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func newUI(t *testing.T) *ui {
 		u.log = append(u.log, fmt.Sprintf(format, args...))
 		t.Logf(format, args...)
 	}
-	u.auth, err = auth.New(admin.Store(), auth.Config{AdminHost: adminHost, Origin: "https://" + adminHost, Now: func() time.Time { return u.now }, Logf: logf, BcryptCost: bcrypt.MinCost})
+	u.auth, err = auth.New(admin.Store(), auth.Config{AdminHost: adminHost, Origin: "https://" + adminHost, Now: func() time.Time { return u.now }, Logf: logf, BcryptCost: bcrypt.MinCost, NoFailureDelay: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 			{"GET", "/aliases"}, {"GET", "/aliases/edit?address=a@example.test"}, {"POST", "/aliases/add"}, {"POST", "/aliases/targets"}, {"POST", "/aliases/remove"},
 			{"POST", "/sendas/add"}, {"POST", "/sendas/remove"},
 			{"GET", "/domains"}, {"GET", "/sendas"}, {"GET", "/log"}, {"GET", "/no/such/page"},
-			{"GET", "/account"}, {"GET", "/account/authenticator"}, {"GET", "/account/authenticator/qr"}, {"GET", "/handoff"},
+			{"GET", "/account"}, {"POST", "/account/authenticator/new"}, {"GET", "/account/authenticator/qr"}, {"GET", "/handoff"},
 			{"POST", "/signout"}, {"POST", "/account/prove"}, {"POST", "/account/password"}, {"POST", "/account/authenticator"},
 			{"POST", "/account/passkeys/begin"}, {"POST", "/account/passkeys/finish"}, {"POST", "/account/passkeys/remove"},
 			{"POST", "/account/prove/passkey/begin"}, {"POST", "/account/prove/passkey/finish"},

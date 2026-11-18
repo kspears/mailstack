@@ -32,6 +32,9 @@ func (e *env) serve(args []string) error {
 	if site.insecure && !loopback(listen) {
 		return fmt.Errorf("MAILCTL_DEV=1 sends cookies over plain HTTP, so it is only allowed when MAILCTL_LISTEN is a loopback address such as 127.0.0.1:8080, not %q", listen)
 	}
+	if !site.insecure && !site.proxy.IsValid() {
+		return errors.New("MAILCTL_TRUSTED_PROXY is not set; it is the IP address of the reverse proxy in front of the UI. Without it every failed sign-in would be logged, and banned, under the proxy's own address")
+	}
 	cfg, err := generate.ConfigFromEnv(e.getenv)
 	if err != nil {
 		return err

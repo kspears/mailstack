@@ -38,7 +38,7 @@
 <button type="submit">Change password</button>
 </form>
 <h2>Authenticator app</h2>
-<a class="button plain" href="/account/authenticator">Replace authenticator...</a>
+<form method="post" action="/account/authenticator/new"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="plain" type="submit">Replace authenticator...</button></form>
 {{end}}
 {{end}}
 {{template "foot" .}}{{end}}

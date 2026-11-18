@@ -33,10 +33,9 @@ CREATE TABLE sessions (
 	proved  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE enrolments (
-	token_hash  BLOB PRIMARY KEY,
-	admin       TEXT NOT NULL REFERENCES admins(address) ON DELETE CASCADE,
-	totp_secret BLOB NOT NULL,
-	expires     INTEGER NOT NULL
+	token_hash BLOB PRIMARY KEY,
+	admin      TEXT NOT NULL REFERENCES admins(address) ON DELETE CASCADE,
+	expires    INTEGER NOT NULL
 );
 CREATE TABLE code_failures (
 	admin TEXT NOT NULL REFERENCES admins(address) ON DELETE CASCADE,
@@ -204,36 +203,32 @@ func (s *Store) AdminByHandle(handle []byte) (AdminAccount, bool, error) {
 }
 
 // NewEnrolment stores a link for the admin and cancels any earlier one.
-func (s *Store) NewEnrolment(address string, tokenHash, totpSecret []byte, expires time.Time) error {
+func (s *Store) NewEnrolment(address string, tokenHash []byte, expires time.Time) error {
 	return s.write(func(tx *sql.Tx) error {
 		if _, err := tx.Exec("DELETE FROM enrolments WHERE admin = ?", address); err != nil {
 			return err
 		}
-		_, err := tx.Exec("INSERT INTO enrolments (token_hash, admin, totp_secret, expires) VALUES (?, ?, ?, ?)",
-			tokenHash, address, totpSecret, expires.Unix())
+		_, err := tx.Exec("INSERT INTO enrolments (token_hash, admin, expires) VALUES (?, ?, ?)", tokenHash, address, expires.Unix())
 		return err
 	})
 }
 
 // Enrolment looks a link up without using it.
-func (s *Store) Enrolment(tokenHash []byte, now time.Time) (address string, totpSecret []byte, ok bool, err error) {
-	err = s.db.QueryRow("SELECT admin, totp_secret FROM enrolments WHERE token_hash = ? AND expires > ?", tokenHash, now.Unix()).
-		Scan(&address, &totpSecret)
+func (s *Store) Enrolment(tokenHash []byte, now time.Time) (address string, ok bool, err error) {
+	err = s.db.QueryRow("SELECT admin FROM enrolments WHERE token_hash = ? AND expires > ?", tokenHash, now.Unix()).Scan(&address)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil, false, nil
+		return "", false, nil
 	}
-	return address, totpSecret, err == nil, err
+	return address, err == nil, err
 }
 
 // CompleteEnrolment uses the link up: it sets the password and authenticator,
 // ends every session the admin had, and reports false if the link was no
-// longer valid. step is the authenticator time step of the confirming code,
-// which is thereby spent.
-func (s *Store) CompleteEnrolment(now time.Time, tokenHash []byte, hash string, step int64) (address string, ok bool, err error) {
+// longer valid. secret is the authenticator key the person confirmed, and
+// step the time step of the confirming code, which is thereby spent.
+func (s *Store) CompleteEnrolment(now time.Time, tokenHash []byte, hash string, secret []byte, step int64) (address string, ok bool, err error) {
 	err = s.write(func(tx *sql.Tx) error {
-		var secret []byte
-		err := tx.QueryRow("SELECT admin, totp_secret FROM enrolments WHERE token_hash = ? AND expires > ?", tokenHash, now.Unix()).
-			Scan(&address, &secret)
+		err := tx.QueryRow("SELECT admin FROM enrolments WHERE token_hash = ? AND expires > ?", tokenHash, now.Unix()).Scan(&address)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -287,21 +282,33 @@ func (s *Store) SetAdminPassword(at time.Time, address, hash string, keep []byte
 		if err := mustExist(res); err != nil {
 			return err
 		}
-		if _, err := tx.Exec("DELETE FROM sessions WHERE admin = ? AND kind = 'admin' AND id_hash <> ?", address, keep); err != nil {
+		if err := endOthers(tx, address, keep); err != nil {
 			return err
 		}
 		return logTx(tx, at, address, "admin.password", address)
 	})
 }
 
-// SetAdminTOTP replaces the authenticator; step is the confirming code's step.
-func (s *Store) SetAdminTOTP(at time.Time, address string, secret []byte, step int64) error {
+// endOthers ends every admin session of address except keep. A credential is
+// usually changed because it may have leaked, and a session opened with the
+// old one must not outlive it.
+func endOthers(tx *sql.Tx, address string, keep []byte) error {
+	_, err := tx.Exec("DELETE FROM sessions WHERE admin = ? AND kind = 'admin' AND id_hash <> ?", address, keep)
+	return err
+}
+
+// SetAdminTOTP replaces the authenticator and ends the admin's other
+// sessions; step is the confirming code's step.
+func (s *Store) SetAdminTOTP(at time.Time, address string, secret []byte, step int64, keep []byte) error {
 	return s.write(func(tx *sql.Tx) error {
 		res, err := tx.Exec("UPDATE admins SET totp_secret = ?, totp_last_step = ? WHERE address = ?", secret, step, address)
 		if err != nil {
 			return err
 		}
 		if err := mustExist(res); err != nil {
+			return err
+		}
+		if err := endOthers(tx, address, keep); err != nil {
 			return err
 		}
 		return logTx(tx, at, address, "admin.authenticator", address)
@@ -318,8 +325,9 @@ func (s *Store) AddPasskey(p Passkey) error {
 	})
 }
 
-// RemovePasskey deletes one of the admin's own passkeys and reports whether it existed.
-func (s *Store) RemovePasskey(at time.Time, address string, id []byte) (bool, error) {
+// RemovePasskey deletes one of the admin's own passkeys, ends the admin's
+// other sessions, and reports whether the passkey existed.
+func (s *Store) RemovePasskey(at time.Time, address string, id, keep []byte) (bool, error) {
 	removed := false
 	err := s.write(func(tx *sql.Tx) error {
 		var label string
@@ -331,6 +339,9 @@ func (s *Store) RemovePasskey(at time.Time, address string, id []byte) (bool, er
 			return err
 		}
 		if _, err := tx.Exec("DELETE FROM passkeys WHERE id = ? AND admin = ?", id, address); err != nil {
+			return err
+		}
+		if err := endOthers(tx, address, keep); err != nil {
 			return err
 		}
 		removed = true

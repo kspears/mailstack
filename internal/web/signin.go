@@ -1,6 +1,7 @@
 package web
 
 import (
+	"crypto/hmac"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -84,7 +85,7 @@ func cspFor(path string) string {
 	switch path {
 	case "/signin", "/account":
 		return cspScript
-	case "/enrol", "/account/authenticator":
+	case "/enrol", "/account/authenticator/new":
 		return cspImage
 	}
 	return csp
@@ -149,7 +150,7 @@ func (s *server) authRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /account/passkeys/begin", s.passkeyAddBegin)
 	mux.HandleFunc("POST /account/passkeys/finish", s.passkeyAddFinish)
 	mux.HandleFunc("POST /account/passkeys/remove", s.passkeyRemove)
-	mux.HandleFunc("GET /account/authenticator", s.authenticatorPage)
+	mux.HandleFunc("POST /account/authenticator/new", s.authenticatorPage)
 	mux.HandleFunc("GET /account/authenticator/qr", s.authenticatorQR)
 	mux.HandleFunc("POST /account/authenticator", s.authenticatorConfirm)
 	mux.HandleFunc("GET /handoff", s.handoff)
@@ -214,19 +215,30 @@ func (s *server) signOut(w http.ResponseWriter, r *http.Request) {
 // JSON: the token travels in a header instead of a form field.
 func (s *server) permitScript(w http.ResponseWriter, r *http.Request) bool {
 	err := sameOrigin(r)
-	if err == nil && r.Header.Get("X-CSRF") != s.token(s.csrfKeyOf(r)) {
+	if err == nil && !hmac.Equal([]byte(r.Header.Get("X-CSRF")), []byte(s.token(s.csrfKeyOf(r)))) {
 		err = errors.New("bad or missing CSRF token")
 	}
 	if err != nil {
-		s.logf("refused %s %s: %v", r.Method, r.URL.Path, err)
+		s.logf("refused %s %q: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}
 	return err == nil
 }
 
+// showable is what to tell the visitor about err. Only a mistake they can
+// correct is described; a fault is logged here and shown as nothing more.
+func (s *server) showable(what string, err error) string {
+	var problem auth.Problem
+	if errors.As(err, &problem) || errors.Is(err, auth.ErrSignIn) {
+		return err.Error()
+	}
+	s.logf("%s: %v", what, err)
+	return "internal error"
+}
+
 func (s *server) sendOptions(w http.ResponseWriter, options any, id string, err error) {
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, s.showable("passkey challenge", err), http.StatusBadRequest)
 		return
 	}
 	s.setCookie(w, ceremonyCookie, id, 300, http.SameSiteStrictMode)
@@ -239,7 +251,7 @@ func (s *server) sendOptions(w http.ResponseWriter, options any, id string, err 
 func (s *server) scriptResult(w http.ResponseWriter, err error) bool {
 	s.setCookie(w, ceremonyCookie, "", -1, http.SameSiteStrictMode)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, s.showable("passkey", err), http.StatusBadRequest)
 		return false
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -249,7 +261,7 @@ func (s *server) scriptResult(w http.ResponseWriter, err error) bool {
 // passkeyBegin issues a challenge for signing in or for proving a session.
 func (s *server) passkeyBegin(w http.ResponseWriter, r *http.Request) {
 	if s.permitScript(w, r) {
-		options, id, err := s.auth.BeginPasskeySignIn()
+		options, id, err := s.auth.BeginPasskeySignIn(s.from(r))
 		s.sendOptions(w, options, id, err)
 	}
 }
@@ -273,7 +285,7 @@ func (s *server) passkeyProve(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) passkeyAddBegin(w http.ResponseWriter, r *http.Request) {
 	if sess, ok := sessionOf(r); ok && s.permitScript(w, r) {
-		options, id, err := s.auth.BeginPasskey(sess, r.URL.Query().Get("label"))
+		options, id, err := s.auth.BeginPasskey(s.from(r), sess, r.URL.Query().Get("label"))
 		s.sendOptions(w, options, id, err)
 	}
 }
@@ -290,7 +302,7 @@ func (s *server) passkeyRemove(w http.ResponseWriter, r *http.Request) {
 	s.accountChange(w, r, "removed the passkey", func(sess store.Session) error {
 		id, err := base64.RawURLEncoding.DecodeString(r.PostFormValue("id"))
 		if err != nil {
-			return errors.New("no such passkey")
+			return auth.Problem("no such passkey")
 		}
 		return s.auth.RemovePasskey(sess, id)
 	})
@@ -298,8 +310,10 @@ func (s *server) passkeyRemove(w http.ResponseWriter, r *http.Request) {
 
 // --- enrolment ---------------------------------------------------------------
 
+// enrolment shows the link's page to the browser r comes from; the
+// authenticator key on it is that browser's alone until it is confirmed.
 func (s *server) enrolment(w http.ResponseWriter, r *http.Request, token string) (auth.Enrolment, bool) {
-	e, ok, err := s.auth.Enrolment(token)
+	e, ok, err := s.auth.Enrolment(token, s.cookie(r, preCookie))
 	if err != nil {
 		s.fail(w, "enrolment", err)
 		return e, false
@@ -318,13 +332,14 @@ type enrolData struct {
 
 func (s *server) enrolPage(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("t")
+	r = s.ensurePre(w, r)
 	if e, ok := s.enrolment(w, r, token); ok {
-		s.render(w, s.ensurePre(w, r), "enrol", "", "Set up your admin sign-in", enrolData{e, token})
+		s.render(w, r, "enrol", "", "Set up your admin sign-in", enrolData{e, token})
 	}
 }
 
 func (s *server) enrolQR(w http.ResponseWriter, r *http.Request) {
-	e, ok, err := s.auth.Enrolment(r.URL.Query().Get("t"))
+	e, ok, err := s.auth.Enrolment(r.URL.Query().Get("t"), s.cookie(r, preCookie))
 	if err != nil || !ok {
 		http.NotFound(w, r)
 		return
@@ -348,11 +363,11 @@ func (s *server) enrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := r.PostFormValue("token")
-	session, err := s.auth.Enrol(token, r.PostFormValue("password"), r.PostFormValue("password2"), r.PostFormValue("code"))
+	session, err := s.auth.Enrol(token, s.cookie(r, preCookie), r.PostFormValue("password"), r.PostFormValue("password2"), r.PostFormValue("code"))
 	if err != nil {
-		e, ok := s.enrolment(w, r, token)
-		if ok {
-			s.renderPage(w, r, "enrol", page{Title: "Set up your admin sign-in", Flash: "error: " + err.Error(), IsErr: true, Data: enrolData{e, token}})
+		line := "error: " + s.showable("enrolment", err)
+		if e, ok := s.enrolment(w, r, token); ok {
+			s.renderPage(w, r, "enrol", page{Title: "Set up your admin sign-in", Flash: line, IsErr: true, Data: enrolData{e, token}})
 		}
 		return
 	}
@@ -391,7 +406,7 @@ func (s *server) accountChange(w http.ResponseWriter, r *http.Request, done stri
 	sess, _ := sessionOf(r)
 	line := "ok: " + done
 	if err := change(sess); err != nil {
-		line = "error: " + err.Error()
+		line = "error: " + s.showable(r.URL.Path, err)
 	}
 	s.flash(w, r, "/account", line)
 }
@@ -408,11 +423,16 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// authenticatorPage starts a replacement. It is a POST because it makes a new
+// pending key, discarding one the admin may be half-way through confirming.
 func (s *server) authenticatorPage(w http.ResponseWriter, r *http.Request) {
+	if !s.permit(w, r) {
+		return
+	}
 	sess, _ := sessionOf(r)
 	e, err := s.auth.NewAuthenticator(sess)
 	if err != nil {
-		s.flash(w, r, "/account", "error: "+err.Error())
+		s.flash(w, r, "/account", "error: "+s.showable("authenticator", err))
 		return
 	}
 	s.render(w, r, "authenticator", "account", "Replace your authenticator", e)
@@ -468,6 +488,11 @@ func (s *server) gateStart(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, s.origin(s.cfg.AdminHost)+"/handoff?"+q.Encode(), http.StatusFound)
 }
 
+// handoff is a GET that issues a ticket, and it has to be: the browser arrives
+// by redirect from the rspamd hostname. What makes that safe is the nonce. A
+// page that sends an admin's browser here learns nothing, and the ticket it
+// causes to exist is useless without a cookie only this browser holds for the
+// rspamd hostname, set by a /_mailstack/start that this browser itself made.
 func (s *server) handoff(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionOf(r)
 	nonceHash, err := base64.RawURLEncoding.DecodeString(r.URL.Query().Get("n"))

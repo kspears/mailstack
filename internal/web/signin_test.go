@@ -268,6 +268,17 @@ func TestEnrolmentLink(t *testing.T) {
 		t.Error("the enrolment page may not show its QR code")
 	}
 	secret := secretIn(page.body)
+	// The key belongs to the browser it was shown to. Whatever else opened the
+	// link, a preview bot or someone reading a log, saw a key that is never stored.
+	if elsewhere := secretIn(u.browser().get("/enrol?t=" + token).body); elsewhere == secret {
+		t.Error("two browsers opening the link were shown the same authenticator key")
+	}
+	if again := secretIn(b.get("/enrol?t=" + token).body); again != secret {
+		t.Error("reloading the page changed the key, so a code already scanned would stop matching")
+	}
+	if strings.Contains(page.body, "<script") || strings.Contains(page.header.Get("Content-Security-Policy"), "script-src") {
+		t.Error("the enrolment page carries a script")
+	}
 	// Mistakes leave the link usable.
 	if r := enrol(b, token, "short", u.code(secret)); r.code != http.StatusOK || !strings.Contains(r.body, "error: password must be at least 12 characters") {
 		t.Errorf("short password: %d\n%s", r.code, r.body)
@@ -333,7 +344,7 @@ func TestChangingCredentialsNeedsFreshProof(t *testing.T) {
 	}
 
 	// Replacing the authenticator: the old one works until the new one is confirmed.
-	page := b.get("/account/authenticator")
+	page := b.post("/account", "/account/authenticator/new", url.Values{})
 	i := strings.Index(page.body, "Key: <code>")
 	if i < 0 {
 		t.Fatalf("no new key shown:\n%s", page.body)
@@ -349,7 +360,13 @@ func TestChangingCredentialsNeedsFreshProof(t *testing.T) {
 		t.Error("the old authenticator stopped working before the new one was confirmed")
 	}
 	// The replacement page was opened once; its key is still the pending one.
+	third := u.browser()
+	u.tick()
+	third.signIn(adminEmail, newPw, u.code(u.secret))
 	b.post("/account", "/account/authenticator", url.Values{"code": {u.code(replacement)}})
+	if !b.signedIn() || third.signedIn() {
+		t.Errorf("after replacing the authenticator: this session %v (want true), another %v (want false)", b.signedIn(), third.signedIn())
+	}
 	u.tick()
 	wantFailed(t, "the old authenticator after replacement", u.browser().signIn(adminEmail, newPw, u.code(u.secret)))
 	if u.browser().signIn(adminEmail, newPw, u.code(replacement)).code != http.StatusSeeOther {
@@ -484,10 +501,19 @@ func TestRspamdHandOff(t *testing.T) {
 		t.Error("the admin cookie opens the rspamd UI")
 	}
 
-	// Signing out of the admin UI closes the rspamd UI too.
+	// Signing out of the admin UI closes the rspamd UI too, and so does a reset.
 	b.post("/mailboxes", "/signout", url.Values{})
 	if allowed(rs) {
 		t.Error("the rspamd session outlived the admin session it came from")
+	}
+	u.tick()
+	b.signIn(adminEmail, adminPw, u.code(u.secret))
+	rs = handOff()
+	if _, err := u.auth.ResetAdmin("cli:test", adminEmail); err != nil {
+		t.Fatal(err)
+	}
+	if allowed(rs) {
+		t.Error("the rspamd session outlived a reset of its admin")
 	}
 }
 
@@ -654,6 +680,37 @@ func TestPasskeys(t *testing.T) {
 		t.Errorf("a challenge requested without the token: %d", r.code)
 	}
 
+	// A passkey answers only for the admin it was made for: the same credential
+	// presented with the other admin's handle is refused.
+	otherKey := &authenticator{t: t}
+	u.tick()
+	other.post("/account", "/account/prove", url.Values{"password": {adminPw}, "code": {u.code(otherSecret)}})
+	if r := other.script("/account", "/account/passkeys/begin", "/account/passkeys/finish", otherKey.create); r.code != http.StatusNoContent {
+		t.Fatalf("the other admin adding a passkey: %d %s", r.code, r.body)
+	}
+	crossed := &authenticator{t: t, key: key.key, id: key.id, handle: otherKey.handle}
+	b = u.browser()
+	if r := b.script("/signin", "/signin/passkey/begin", "/signin/passkey/finish", crossed.get); r.code != http.StatusBadRequest || b.signedIn() {
+		t.Errorf("one admin's passkey with another admin's handle: %d, signed in %v", r.code, b.signedIn())
+	}
+
+	// One visitor may hold only a few challenges, so a flood cannot crowd the admins out.
+	flood := u.browser()
+	flood.forward = "203.0.113.50"
+	headers := map[string]string{"X-CSRF": csrfIn(t, flood.get("/signin").body)}
+	var refused int
+	for range 15 {
+		if flood.send(http.MethodPost, adminHost, "/signin/passkey/begin", "", nil, headers).code != http.StatusOK {
+			refused++
+		}
+	}
+	if refused != 5 {
+		t.Errorf("%d of 15 challenges refused to one visitor, want 5", refused)
+	}
+	if r := u.browser().script("/signin", "/signin/passkey/begin", "/signin/passkey/finish", key.get); r.code != http.StatusNoContent {
+		t.Errorf("another visitor's passkey sign-in during the flood: %d %s", r.code, r.body)
+	}
+
 	// Removing it, which only its owner can do, ends its use.
 	id := b64(key.id)
 	if r := other.get(other.post("/account", "/account/passkeys/remove", url.Values{"id": {id}}).header.Get("Location")); !strings.Contains(r.body, "error:") {
@@ -664,5 +721,41 @@ func TestPasskeys(t *testing.T) {
 	}
 	if r := u.browser().script("/signin", "/signin/passkey/begin", "/signin/passkey/finish", key.get); r.code != http.StatusBadRequest {
 		t.Errorf("a removed passkey still signs in: %d", r.code)
+	}
+}
+
+// The log is what bans are made from, and the path of a request is the
+// visitor's to choose. It must not be able to forge a line, or part of one.
+func TestRequestPathCannotForgeALogLine(t *testing.T) {
+	u := newUI(t)
+	u.log = nil
+	b := u.browser()
+	b.send(http.MethodGet, adminHost, "/x%0A2026/11/18%2009:00:00%20sign-in%20failed%20from=198.51.100.9%20address=%22a%22:%20wrong", "", nil, nil)
+	b.send(http.MethodGet, adminHost, "/sign-in%20failed%20from=198.51.100.9", "", nil, nil)
+	b.send(http.MethodPost, adminHost, "/signin%0Asign-in%20failed%20from=198.51.100.9", "application/x-www-form-urlencoded", nil, nil)
+	if len(u.log) == 0 {
+		t.Fatal("nothing was logged")
+	}
+	for _, line := range u.log {
+		if strings.ContainsAny(line, "\n\r") || strings.HasPrefix(line, "sign-in failed") || strings.HasPrefix(line, "proof failed") {
+			t.Errorf("a request path produced the log line %q", line)
+		}
+	}
+}
+
+func TestFailedProofIsLoggedLikeAFailedSignIn(t *testing.T) {
+	u := newUI(t)
+	u.tick()
+	b := u.browser()
+	b.signIn(adminEmail, adminPw, u.code(u.secret))
+	u.now = u.now.Add(auth.ProofLife + time.Minute)
+	u.log = nil
+	b.post("/account", "/account/prove", url.Values{"password": {adminPw}, "code": {"000000"}})
+	var logged bool
+	for _, line := range u.log {
+		logged = logged || strings.HasPrefix(line, "proof failed from=203.0.113.7 ")
+	}
+	if !logged {
+		t.Errorf("a failed proof was not logged with the visitor's address:\n%s", strings.Join(u.log, "\n"))
 	}
 }
