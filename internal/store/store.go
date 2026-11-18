@@ -297,8 +297,8 @@ func snapshot(q querier) (Snapshot, error) {
 	return snap, err
 }
 
-func scan(q querier, query string, each func(*sql.Rows) error) error {
-	rows, err := q.Query(query)
+func scan(q querier, query string, each func(*sql.Rows) error, args ...any) error {
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return err
 	}

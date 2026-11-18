@@ -46,7 +46,13 @@ CREATE TABLE tickets (
 	session    BLOB NOT NULL REFERENCES sessions(id_hash) ON DELETE CASCADE,
 	nonce_hash BLOB NOT NULL,
 	expires    INTEGER NOT NULL
-);`
+);
+-- Foreign keys are enforced, so deleting a session or an admin looks for its
+-- children; without these each such delete would scan the whole child table.
+CREATE INDEX sessions_parent ON sessions(parent);
+CREATE INDEX sessions_admin ON sessions(admin);
+CREATE INDEX tickets_session ON tickets(session);
+CREATE INDEX code_failures_admin ON code_failures(admin, at);`
 
 func init() { migrations = append(migrations, authSchema) }
 
@@ -85,7 +91,7 @@ type Session struct {
 	IDHash  []byte
 	Admin   string
 	Kind    string
-	Parent  []byte
+	Parent  []byte // set when creating an rspamd session; not read back
 	Expires time.Time
 	Proved  time.Time
 }
@@ -106,9 +112,7 @@ func (s *Store) write(fn func(tx *sql.Tx) error) error {
 }
 
 func logTx(tx *sql.Tx, at time.Time, actor, action, subject string) error {
-	_, err := tx.Exec("INSERT INTO log (time, actor, action, subject) VALUES (?, ?, ?, ?)",
-		at.UTC().Format(time.RFC3339), actor, action, subject)
-	return err
+	return (&Tx{tx}).Log(at, actor, action, subject)
 }
 
 func mustExist(res sql.Result) error {
@@ -357,22 +361,18 @@ func (s *Store) UpdatePasskey(id, credential []byte) error {
 }
 
 func (s *Store) Passkeys(address string) ([]Passkey, error) {
-	rows, err := s.db.Query("SELECT id, admin, credential, label, created FROM passkeys WHERE admin = ? ORDER BY created, id", address)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []Passkey
-	for rows.Next() {
+	err := scan(s.db, "SELECT id, admin, credential, label, created FROM passkeys WHERE admin = ? ORDER BY created, id", func(r *sql.Rows) error {
 		var p Passkey
 		var created int64
-		if err := rows.Scan(&p.ID, &p.Admin, &p.Credential, &p.Label, &created); err != nil {
-			return nil, err
+		if err := r.Scan(&p.ID, &p.Admin, &p.Credential, &p.Label, &created); err != nil {
+			return err
 		}
 		p.Created = time.Unix(created, 0)
 		out = append(out, p)
-	}
-	return out, rows.Err()
+		return nil
+	}, address)
+	return out, err
 }
 
 func (s *Store) CreateSession(sess Session) error {
@@ -385,8 +385,8 @@ func (s *Store) CreateSession(sess Session) error {
 func (s *Store) SessionByHash(idHash []byte, now time.Time) (Session, bool, error) {
 	sess := Session{IDHash: idHash}
 	var expires, proved int64
-	err := s.db.QueryRow("SELECT admin, kind, parent, expires, proved FROM sessions WHERE id_hash = ? AND expires > ?", idHash, now.Unix()).
-		Scan(&sess.Admin, &sess.Kind, &sess.Parent, &expires, &proved)
+	err := s.db.QueryRow("SELECT admin, kind, expires, proved FROM sessions WHERE id_hash = ? AND expires > ?", idHash, now.Unix()).
+		Scan(&sess.Admin, &sess.Kind, &expires, &proved)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sess, false, nil
 	}
@@ -434,10 +434,8 @@ func (s *Store) TakeTicket(tokenHash []byte, now time.Time) (session, nonceHash 
 // no longer count toward any limit.
 func (s *Store) PruneAuth(now time.Time) error {
 	return s.write(func(tx *sql.Tx) error {
-		for table, cutoff := range map[string]int64{
-			"sessions": now.Unix(), "enrolments": now.Unix(), "tickets": now.Unix(),
-		} {
-			if _, err := tx.Exec("DELETE FROM "+table+" WHERE expires <= ?", cutoff); err != nil {
+		for _, table := range []string{"sessions", "enrolments", "tickets"} {
+			if _, err := tx.Exec("DELETE FROM "+table+" WHERE expires <= ?", now.Unix()); err != nil {
 				return err
 			}
 		}

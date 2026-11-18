@@ -77,7 +77,7 @@ func New(cfg Config) (http.Handler, error) {
 	if cfg.AdminHost == "" {
 		return nil, fmt.Errorf("the admin UI needs the hostname it is served on")
 	}
-	s := &server{cfg: cfg, admin: cfg.Admin, auth: cfg.Auth, logf: cfg.Logf, csrfKey: make([]byte, 32)}
+	s := &server{cfg: cfg, admin: cfg.Admin, auth: cfg.Auth, logf: auth.SingleLine(cfg.Logf), csrfKey: make([]byte, 32)}
 	if _, err := rand.Read(s.csrfKey); err != nil {
 		return nil, fmt.Errorf("generate CSRF key: %w", err)
 	}
@@ -128,7 +128,12 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func (s *server) guard(next http.Handler) http.Handler {
+// guard is the one place every request passes, and the one place that decides
+// whether it may proceed: the right hostname, a session where one is needed,
+// and for anything that is not a plain read, proof that one of this origin's
+// own pages sent it. Handlers behind it check none of that themselves, so a
+// new one cannot forget to.
+func (s *server) guard(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
@@ -138,29 +143,49 @@ func (s *server) guard(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cache-Control", "no-store")
 
-		actor := "-"
-		sess, signedIn := s.auth.Session(s.cookie(r, sessionCookie), store.AdminSession)
-		if signedIn {
-			actor = sess.Admin
+		path, actor := r.URL.Path, "-"
+		hostOK, signedIn := s.hostAllowed(r), false
+		// Static files and the rspamd gate never act for an admin, so they are
+		// spared the lookup: the gate runs before every request to rspamd's UI.
+		if hostOK && !strings.HasPrefix(path, "/static/") && !strings.HasPrefix(path, gatePrefix) {
+			var sess store.Session
+			if sess, signedIn = s.auth.Session(s.cookie(r, sessionCookie), store.AdminSession); signedIn {
+				actor = sess.Admin
+				r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, sess))
+			}
 		}
 		r.Body = http.MaxBytesReader(sw, r.Body, maxBody)
+		read := r.Method == http.MethodGet || r.Method == http.MethodHead
+		_, route := mux.Handler(r)
 		switch {
-		case !s.hostAllowed(r):
-			s.logf("refused %s %q: host %q is not served here", r.Method, r.URL.Path, r.Host)
+		case !hostOK:
+			s.logf("refused %s %q: host %q is not served here", r.Method, path, r.Host)
 			http.Error(sw, "misdirected request", http.StatusMisdirectedRequest)
-		case signedIn:
-			next.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), ctxKey{}, sess)))
-		case public(r.URL.Path):
-			next.ServeHTTP(sw, r)
-		case r.Method == http.MethodGet:
+		case !signedIn && !public(path) && read && route == "":
+			// Browsers ask for icons on every page; no page of ours is behind them.
+			http.NotFound(sw, r)
+		case !signedIn && !public(path) && read:
 			http.Redirect(sw, r, "/signin", http.StatusSeeOther)
-		default:
+		case !signedIn && !public(path):
 			http.Error(sw, "forbidden", http.StatusForbidden)
+		case signedIn && path == "/signin":
+			// Also a sign-in form left open in one tab and submitted after signing
+			// in from another: its token is the signed-out one, and there is
+			// nothing left for it to do.
+			http.Redirect(sw, r, "/mailboxes", http.StatusSeeOther)
+		case !read && s.refuseChange(sw, r):
+		default:
+			mux.ServeHTTP(sw, r)
+		}
+		// rspamd's UI polls, and the proxy asks about every request it makes. Those
+		// lines would bury the failures that bans are made from.
+		if path == gatePrefix+"check" && sw.status == http.StatusNoContent {
+			return
 		}
 		// The path is the visitor's to choose, so it is quoted: it must not be able
-		// to start a line of its own, or to make this line read as a failed
-		// sign-in from an address of the visitor's choosing.
-		s.logf("%s %q %d %s %s", r.Method, r.URL.Path, sw.status, actor, time.Since(start).Round(time.Millisecond))
+		// to make this line read as a failed sign-in from an address of the
+		// visitor's choosing.
+		s.logf("%s %q %d %s %s", r.Method, path, sw.status, actor, time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -172,50 +197,41 @@ func (s *server) token(key string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// sameOrigin reports whether the browser says the request was made by one of
-// this origin's own pages. Sec-Fetch-Site is set by the browser and cannot be
-// forged by a page. Sibling hostnames under one domain count as "same-site",
-// not "same-origin", so nothing served from them passes.
-func sameOrigin(r *http.Request) error {
+// checkChange decides whether a request that changes something may proceed.
+// The browser must say that one of this origin's own pages made it:
+// Sec-Fetch-Site is set by the browser and cannot be forged by a page, and
+// sibling hostnames under one domain count as "same-site", so nothing served
+// from them passes. It must also carry the CSRF token, in the X-CSRF header
+// (the passkey script, whose bodies are JSON) or the form's csrf field.
+func (s *server) checkChange(r *http.Request) error {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "same-origin" {
 		return fmt.Errorf("Sec-Fetch-Site is %q, not same-origin", site)
 	}
-	return nil
-}
-
-// checkPost enforces same-origin and the CSRF token, then parses the form.
-func (s *server) checkPost(r *http.Request) error {
-	if err := sameOrigin(r); err != nil {
-		return err
+	got := r.Header.Get("X-CSRF")
+	if got == "" {
+		if err := r.ParseForm(); err != nil {
+			return fmt.Errorf("read form: %w", err)
+		}
+		got = r.PostFormValue("csrf")
 	}
-	if err := r.ParseForm(); err != nil {
-		return fmt.Errorf("read form: %w", err)
-	}
-	if !hmac.Equal([]byte(r.PostFormValue("csrf")), []byte(s.token(s.csrfKeyOf(r)))) {
+	if !hmac.Equal([]byte(got), []byte(s.token(s.csrfKeyOf(r)))) {
 		return fmt.Errorf("bad or missing CSRF token")
 	}
 	return nil
 }
 
-// permit answers 403 and reports false unless the POST passes checkPost.
-func (s *server) permit(w http.ResponseWriter, r *http.Request) bool {
-	err := s.checkPost(r)
+// refuseChange answers 403 and reports true unless the request passes checkChange.
+func (s *server) refuseChange(w http.ResponseWriter, r *http.Request) bool {
+	err := s.checkChange(r)
 	if err != nil {
 		s.logf("refused %s %q: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}
-	return err == nil
+	return err != nil
 }
 
-// do runs a change from a POST, then redirects to the page with the exact CLI line as a flash.
+// do runs a change and redirects to the page with the exact CLI line as a flash.
 func (s *server) do(w http.ResponseWriter, r *http.Request, back string, op func(actor string) (string, error)) {
-	if s.permit(w, r) {
-		s.finish(w, r, back, op)
-	}
-}
-
-// finish runs an already-permitted change and redirects with its result as a flash.
-func (s *server) finish(w http.ResponseWriter, r *http.Request, back string, op func(actor string) (string, error)) {
 	line := ""
 	if summary, err := op(actorOf(r)); err != nil {
 		line = "error: " + err.Error()
@@ -225,8 +241,13 @@ func (s *server) finish(w http.ResponseWriter, r *http.Request, back string, op 
 	s.flash(w, r, back, line)
 }
 
-func (s *server) flash(w http.ResponseWriter, r *http.Request, back, line string) {
+// setFlash leaves a line for the next page to show once.
+func (s *server) setFlash(w http.ResponseWriter, line string) {
 	s.setCookie(w, flashCookie, base64.RawURLEncoding.EncodeToString([]byte(line)), 60, http.SameSiteStrictMode)
+}
+
+func (s *server) flash(w http.ResponseWriter, r *http.Request, back, line string) {
+	s.setFlash(w, line)
 	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
@@ -340,11 +361,8 @@ func (s *server) mailboxPassword(w http.ResponseWriter, r *http.Request) {
 // the form's "generate" button was pressed; a generated password is shown once,
 // in the response to this POST, and is never put in a cookie or a redirect.
 func (s *server) withPassword(w http.ResponseWriter, r *http.Request, op func(actor, pw string) (string, error)) {
-	if !s.permit(w, r) {
-		return
-	}
 	if r.PostFormValue("generate") == "" {
-		s.finish(w, r, "/mailboxes", func(actor string) (string, error) {
+		s.do(w, r, "/mailboxes", func(actor string) (string, error) {
 			pw, err := samePassword(r)
 			if err != nil {
 				return "", err

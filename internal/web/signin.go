@@ -1,7 +1,6 @@
 package web
 
 import (
-	"crypto/hmac"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -130,6 +129,9 @@ func (s *server) from(r *http.Request) string {
 	if visitor, err := netip.ParseAddr(strings.TrimSpace(parts[len(parts)-1])); err == nil {
 		return visitor.Unmap().String()
 	}
+	// Said out loud, because the consequence is quiet: failures would be logged,
+	// and banned, under the proxy's own address.
+	s.logf("warning: the proxy sent no usable %s header; treating its own address %s as the visitor's", s.cfg.ClientAddrHeader, host)
 	return host
 }
 
@@ -162,10 +164,6 @@ func (s *server) authRoutes(mux *http.ServeMux) {
 // --- sign-in -----------------------------------------------------------------
 
 func (s *server) signInPage(w http.ResponseWriter, r *http.Request) {
-	if _, ok := sessionOf(r); ok {
-		http.Redirect(w, r, "/mailboxes", http.StatusSeeOther)
-		return
-	}
 	s.render(w, s.ensurePre(w, r), "signin", "", "Sign in", nil)
 }
 
@@ -179,9 +177,6 @@ func (s *server) startSession(w http.ResponseWriter, token string) {
 }
 
 func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
-	if !s.permit(w, r) {
-		return
-	}
 	token, err := s.auth.SignIn(s.from(r), r.PostFormValue("address"), r.PostFormValue("password"), r.PostFormValue("code"))
 	if errors.Is(err, auth.ErrSignIn) {
 		s.signInFailed(w, r)
@@ -196,9 +191,6 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) signOut(w http.ResponseWriter, r *http.Request) {
-	if !s.permit(w, r) {
-		return
-	}
 	if sess, ok := sessionOf(r); ok {
 		if err := s.auth.SignOut(sess); err != nil {
 			s.fail(w, "sign-out", err)
@@ -211,20 +203,6 @@ func (s *server) signOut(w http.ResponseWriter, r *http.Request) {
 
 // --- passkeys ----------------------------------------------------------------
 
-// permitScript is permit for the passkey script's requests, whose bodies are
-// JSON: the token travels in a header instead of a form field.
-func (s *server) permitScript(w http.ResponseWriter, r *http.Request) bool {
-	err := sameOrigin(r)
-	if err == nil && !hmac.Equal([]byte(r.Header.Get("X-CSRF")), []byte(s.token(s.csrfKeyOf(r)))) {
-		err = errors.New("bad or missing CSRF token")
-	}
-	if err != nil {
-		s.logf("refused %s %q: %v", r.Method, r.URL.Path, err)
-		http.Error(w, "forbidden", http.StatusForbidden)
-	}
-	return err == nil
-}
-
 // showable is what to tell the visitor about err. Only a mistake they can
 // correct is described; a fault is logged here and shown as nothing more.
 func (s *server) showable(what string, err error) string {
@@ -232,7 +210,7 @@ func (s *server) showable(what string, err error) string {
 	if errors.As(err, &problem) || errors.Is(err, auth.ErrSignIn) {
 		return err.Error()
 	}
-	s.logf("%s: %v", what, err)
+	s.logf("%q: %v", what, err)
 	return "internal error"
 }
 
@@ -260,16 +238,12 @@ func (s *server) scriptResult(w http.ResponseWriter, err error) bool {
 
 // passkeyBegin issues a challenge for signing in or for proving a session.
 func (s *server) passkeyBegin(w http.ResponseWriter, r *http.Request) {
-	if s.permitScript(w, r) {
-		options, id, err := s.auth.BeginPasskeySignIn(s.from(r))
-		s.sendOptions(w, options, id, err)
-	}
+	s.auth.DropCeremony(s.cookie(r, ceremonyCookie))
+	options, id, err := s.auth.BeginPasskeySignIn(s.from(r))
+	s.sendOptions(w, options, id, err)
 }
 
 func (s *server) passkeySignIn(w http.ResponseWriter, r *http.Request) {
-	if !s.permitScript(w, r) {
-		return
-	}
 	token, err := s.auth.FinishPasskeySignIn(s.from(r), s.cookie(r, ceremonyCookie), r)
 	if err == nil {
 		s.startSession(w, token)
@@ -278,22 +252,23 @@ func (s *server) passkeySignIn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) passkeyProve(w http.ResponseWriter, r *http.Request) {
-	if sess, ok := sessionOf(r); ok && s.permitScript(w, r) {
+	if sess, ok := sessionOf(r); ok {
 		s.scriptResult(w, s.auth.ProveWithPasskey(s.from(r), sess, s.cookie(r, ceremonyCookie), r))
 	}
 }
 
 func (s *server) passkeyAddBegin(w http.ResponseWriter, r *http.Request) {
-	if sess, ok := sessionOf(r); ok && s.permitScript(w, r) {
+	if sess, ok := sessionOf(r); ok {
+		s.auth.DropCeremony(s.cookie(r, ceremonyCookie))
 		options, id, err := s.auth.BeginPasskey(s.from(r), sess, r.URL.Query().Get("label"))
 		s.sendOptions(w, options, id, err)
 	}
 }
 
 func (s *server) passkeyAddFinish(w http.ResponseWriter, r *http.Request) {
-	if sess, ok := sessionOf(r); ok && s.permitScript(w, r) {
+	if sess, ok := sessionOf(r); ok {
 		if s.scriptResult(w, s.auth.FinishPasskey(sess, s.cookie(r, ceremonyCookie), r)) {
-			s.setCookie(w, flashCookie, base64.RawURLEncoding.EncodeToString([]byte("ok: passkey added")), 60, http.SameSiteStrictMode)
+			s.setFlash(w, "ok: passkey added")
 		}
 	}
 }
@@ -359,9 +334,6 @@ func writeQR(w http.ResponseWriter, text string) {
 }
 
 func (s *server) enrol(w http.ResponseWriter, r *http.Request) {
-	if !s.permit(w, r) {
-		return
-	}
 	token := r.PostFormValue("token")
 	session, err := s.auth.Enrol(token, s.cookie(r, preCookie), r.PostFormValue("password"), r.PostFormValue("password2"), r.PostFormValue("code"))
 	if err != nil {
@@ -400,9 +372,6 @@ func (s *server) account(w http.ResponseWriter, r *http.Request) {
 // accountChange runs one change to the admin's own credentials and returns to
 // the account page with the outcome.
 func (s *server) accountChange(w http.ResponseWriter, r *http.Request, done string, change func(store.Session) error) {
-	if !s.permit(w, r) {
-		return
-	}
 	sess, _ := sessionOf(r)
 	line := "ok: " + done
 	if err := change(sess); err != nil {
@@ -426,9 +395,6 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 // authenticatorPage starts a replacement. It is a POST because it makes a new
 // pending key, discarding one the admin may be half-way through confirming.
 func (s *server) authenticatorPage(w http.ResponseWriter, r *http.Request) {
-	if !s.permit(w, r) {
-		return
-	}
 	sess, _ := sessionOf(r)
 	e, err := s.auth.NewAuthenticator(sess)
 	if err != nil {

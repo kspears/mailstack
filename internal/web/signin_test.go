@@ -162,8 +162,15 @@ func TestSignInFormIsNotForgeable(t *testing.T) {
 	if r := post(u.browser(), f, nil); r.code != http.StatusForbidden {
 		t.Errorf("sign-in with another visitor's token: %d, want 403", r.code)
 	}
+	stale := u.browser()
+	staleForm := form(stale)
 	if r := post(b, f, nil); r.code != http.StatusSeeOther {
 		t.Errorf("the untouched form: %d, want 303", r.code)
+	}
+	// A form left open in a tab while the same browser signed in from another.
+	stale.cookies["__Host-"+sessionCookie] = b.cookies["__Host-"+sessionCookie]
+	if r := post(stale, staleForm, nil); r.code != http.StatusSeeOther || r.header.Get("Location") != "/mailboxes" {
+		t.Errorf("a stale sign-in form from a signed-in browser: %d to %q, want the mailboxes page", r.code, r.header.Get("Location"))
 	}
 }
 
@@ -219,7 +226,7 @@ func TestSessionsEnd(t *testing.T) {
 	}
 
 	b = signIn()
-	if _, err := u.auth.ResetAdmin("cli:test", adminEmail); err != nil {
+	if _, _, err := u.auth.ResetAdmin("cli:test", adminEmail); err != nil {
 		t.Fatal(err)
 	}
 	if b.signedIn() {
@@ -232,7 +239,7 @@ func TestSessionsEnd(t *testing.T) {
 func TestEnrolmentLink(t *testing.T) {
 	u := newUI(t)
 	newLink := func() string {
-		token, err := u.auth.ResetAdmin("cli:test", adminEmail)
+		_, token, err := u.auth.ResetAdmin("cli:test", adminEmail)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -402,6 +409,13 @@ func TestVisitorAddressIsBelievedOnlyFromTheProxy(t *testing.T) {
 			got = append(got, strings.Fields(rest)[0])
 		}
 	}
+	var warned bool
+	for _, line := range u.log {
+		warned = warned || strings.HasPrefix(line, "warning: the proxy sent no usable X-Forwarded-For header")
+	}
+	if !warned {
+		t.Error("an unreadable address from the proxy was not warned about")
+	}
 	// A stranger's header is ignored; an unreadable one falls back to the
 	// proxy's own address; of a list, the entry the proxy appended counts.
 	if want := "198.51.100.9 192.0.2.1 203.0.113.8"; strings.Join(got, " ") != want {
@@ -509,7 +523,7 @@ func TestRspamdHandOff(t *testing.T) {
 	u.tick()
 	b.signIn(adminEmail, adminPw, u.code(u.secret))
 	rs = handOff()
-	if _, err := u.auth.ResetAdmin("cli:test", adminEmail); err != nil {
+	if _, _, err := u.auth.ResetAdmin("cli:test", adminEmail); err != nil {
 		t.Fatal(err)
 	}
 	if allowed(rs) {
@@ -694,12 +708,24 @@ func TestPasskeys(t *testing.T) {
 		t.Errorf("one admin's passkey with another admin's handle: %d, signed in %v", r.code, b.signedIn())
 	}
 
+	// Pressing the button again after cancelling replaces the challenge the
+	// browser held, so cancelling many times is never mistaken for a flood.
+	fumble := u.browser()
+	fumble.forward = "203.0.113.60"
+	headers := map[string]string{"X-CSRF": csrfIn(t, fumble.get("/signin").body)}
+	for range 25 {
+		if r := fumble.send(http.MethodPost, adminHost, "/signin/passkey/begin", "", nil, headers); r.code != http.StatusOK {
+			t.Fatalf("a repeated passkey prompt from one browser was refused: %d %s", r.code, r.body)
+		}
+	}
+
 	// One visitor may hold only a few challenges, so a flood cannot crowd the admins out.
 	flood := u.browser()
 	flood.forward = "203.0.113.50"
-	headers := map[string]string{"X-CSRF": csrfIn(t, flood.get("/signin").body)}
+	headers = map[string]string{"X-CSRF": csrfIn(t, flood.get("/signin").body)}
 	var refused int
 	for range 15 {
+		delete(flood.cookies, "__Host-"+ceremonyCookie) // a script, not a browser: it keeps no cookie
 		if flood.send(http.MethodPost, adminHost, "/signin/passkey/begin", "", nil, headers).code != http.StatusOK {
 			refused++
 		}

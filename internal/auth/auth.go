@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/crypto/bcrypt"
@@ -35,6 +36,7 @@ const (
 	bcryptCost     = 12
 	ceremonyLife   = 5 * time.Minute
 	pendingLife    = 15 * time.Minute
+	maxPending     = 1000
 	maxLabelLength = 40
 	// Passkey challenges are kept in memory and anyone may ask for one, so
 	// they are capped per visitor, and the oldest go first when the whole
@@ -65,8 +67,9 @@ type Config struct {
 	Now    func() time.Time
 	// BcryptCost is for tests, which hash hundreds of passwords; zero means 12.
 	BcryptCost int
-	// NoFailureDelay is for tests, which fail on purpose hundreds of times.
-	NoFailureDelay bool
+	// Sleep is time.Sleep unless a test, which fails on purpose hundreds of
+	// times, replaces it.
+	Sleep func(time.Duration)
 	// Logf receives one line per failed sign-in or proof. The visitor's address
 	// comes first so that a ban rule can anchor on it.
 	Logf func(format string, args ...any)
@@ -94,9 +97,13 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	if cfg.BcryptCost == 0 {
 		cfg.BcryptCost = bcryptCost
 	}
+	if cfg.Sleep == nil {
+		cfg.Sleep = time.Sleep
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
+	cfg.Logf = SingleLine(cfg.Logf)
 	host := cfg.AdminHost
 	if i := strings.LastIndex(host, ":"); i >= 0 {
 		host = host[:i]
@@ -123,13 +130,37 @@ func newToken() (token string, hash []byte) {
 	return token, Hash(token)
 }
 
+// SingleLine wraps logf so that one call writes exactly one line, whatever
+// the arguments hold. Bans are made from this log, and several things in it
+// (a path, an address, a library's error text) are chosen by the visitor: none
+// of them may start a line of its own.
+func SingleLine(logf func(format string, args ...any)) func(format string, args ...any) {
+	return func(format string, args ...any) {
+		logf("%s", strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+				return ' '
+			}
+			return r
+		}, fmt.Sprintf(format, args...)))
+	}
+}
+
+// refused logs a failure in the one format a ban rule matches,
+// "<what> failed from=<address> <detail>", and returns the only error a
+// visitor is shown for it.
+func (s *Service) refused(what, from, detail string) error {
+	s.cfg.Logf("%s failed from=%s %s", what, from, detail)
+	return ErrSignIn
+}
+
 // Hash is how every token is stored and looked up.
 func Hash(token string) []byte {
 	sum := sha256.Sum256([]byte(token))
 	return sum[:]
 }
 
-func (s *Service) hashPassword(a, b string) (string, error) {
+// checkedPassword returns the password when both entries match and it is acceptable.
+func checkedPassword(a, b string) (string, error) {
 	pw, err := validate.SamePassword(a, b)
 	if err == nil {
 		err = validate.Password(pw)
@@ -137,39 +168,50 @@ func (s *Service) hashPassword(a, b string) (string, error) {
 	if err != nil {
 		return "", Problem(err.Error())
 	}
-	h, err := bcrypt.GenerateFromPassword([]byte(pw), s.cfg.BcryptCost)
+	return pw, nil
+}
+
+func (s *Service) hash(password string) (string, error) {
+	h, err := bcrypt.GenerateFromPassword([]byte(password), s.cfg.BcryptCost)
 	return string(h), err
 }
 
 // --- accounts, managed from the command line --------------------------------
 
-// AddAdmin creates an admin with no way in yet and returns an enrolment token.
-func (s *Service) AddAdmin(actor, address string) (token string, err error) {
-	addr, err := validate.Address(address)
-	if err != nil {
-		return "", err
+// AddAdmin creates an admin with no way in yet. It returns the address as
+// stored and an enrolment token.
+func (s *Service) AddAdmin(actor, address string) (addr, token string, err error) {
+	if addr, err = validate.Address(address); err != nil {
+		return "", "", err
 	}
 	handle := make([]byte, 32)
 	rand.Read(handle)
 	if err := s.st.AddAdmin(s.cfg.Now(), actor, addr, handle); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return s.newEnrolment(addr)
+	token, err = s.newEnrolment(addr)
+	return addr, token, err
 }
 
 // ResetAdmin strips every credential and session and returns a new enrolment token.
-func (s *Service) ResetAdmin(actor, address string) (token string, err error) {
-	addr := strings.ToLower(strings.TrimSpace(address))
+func (s *Service) ResetAdmin(actor, address string) (addr, token string, err error) {
+	addr = normalise(address)
 	if err := s.st.ResetAdmin(s.cfg.Now(), actor, addr); err != nil {
-		return "", noAdmin(err, addr)
+		return "", "", noAdmin(err, addr)
 	}
-	return s.newEnrolment(addr)
+	token, err = s.newEnrolment(addr)
+	return addr, token, err
 }
 
-func (s *Service) RemoveAdmin(actor, address string) error {
-	addr := strings.ToLower(strings.TrimSpace(address))
-	return noAdmin(s.st.RemoveAdmin(s.cfg.Now(), actor, addr), addr)
+func (s *Service) RemoveAdmin(actor, address string) (addr string, err error) {
+	addr = normalise(address)
+	return addr, noAdmin(s.st.RemoveAdmin(s.cfg.Now(), actor, addr), addr)
 }
+
+// normalise is how an address is compared. Sign-in must not validate beyond
+// this: refusing a malformed address early would skip the password comparison
+// that makes an unknown address cost what a known one does.
+func normalise(address string) string { return strings.ToLower(strings.TrimSpace(address)) }
 
 func noAdmin(err error, address string) error {
 	if errors.Is(err, store.ErrNoAdmin) {
@@ -216,6 +258,17 @@ func (s *Service) offer(name string, fresh bool) []byte {
 	}
 	if p, ok := s.pending[name]; ok && !fresh {
 		return p.secret
+	}
+	// Each browser that opens a live enrolment link is offered a key, so the
+	// table is bounded: when it is full the oldest offer gives way.
+	if len(s.pending) >= maxPending {
+		var oldest string
+		for k, p := range s.pending {
+			if oldest == "" || p.expires.Before(s.pending[oldest].expires) {
+				oldest = k
+			}
+		}
+		delete(s.pending, oldest)
 	}
 	secret := make([]byte, 20)
 	rand.Read(secret)
@@ -267,13 +320,18 @@ func (s *Service) Enrol(token, browser, pw, pw2, code string) (session string, e
 	if !ok {
 		return "", Problem("this page was open too long; scan the code shown now and try again")
 	}
-	hash, err := s.hashPassword(pw, pw2)
+	password, err := checkedPassword(pw, pw2)
 	if err != nil {
 		return "", err
 	}
 	step, ok := totpMatch(secret, code, now)
 	if !ok {
 		return "", Problem("that code does not match; check the authenticator app and the clock on this device")
+	}
+	// Hashed last: it is the expensive step, and a mistyped code is common.
+	hash, err := s.hash(password)
+	if err != nil {
+		return "", err
 	}
 	address, ok, err := s.st.CompleteEnrolment(now, Hash(token), hash, secret, step)
 	if err != nil {
@@ -292,7 +350,7 @@ func (s *Service) Enrol(token, browser, pw, pw2, code string) (session string, e
 // returns a new session's cookie value. from is the visitor's address, for the
 // log line a ban is made from.
 func (s *Service) SignIn(from, address, password, code string) (session string, err error) {
-	admin, err := s.checkPasswordAndCode(from, "sign-in", strings.ToLower(strings.TrimSpace(address)), password, code)
+	admin, err := s.checkPasswordAndCode(from, "sign-in", normalise(address), password, code)
 	if err != nil {
 		return "", err
 	}
@@ -302,8 +360,8 @@ func (s *Service) SignIn(from, address, password, code string) (session string, 
 func (s *Service) checkPasswordAndCode(from, what, address, password, code string) (string, error) {
 	started := time.Now()
 	admin, err := s.passwordAndCode(from, what, address, password, code)
-	if err != nil && !s.cfg.NoFailureDelay {
-		time.Sleep(time.Until(started.Add(failureFloor)))
+	if err != nil {
+		s.cfg.Sleep(time.Until(started.Add(failureFloor)))
 	}
 	return admin, err
 }
@@ -311,15 +369,15 @@ func (s *Service) checkPasswordAndCode(from, what, address, password, code strin
 func (s *Service) passwordAndCode(from, what, address, password, code string) (string, error) {
 	now := s.cfg.Now()
 	refuse := func(why string) (string, error) {
-		s.cfg.Logf("%s failed from=%s address=%q: %s", what, from, address, why)
-		return "", ErrSignIn
+		return "", s.refused(what, from, fmt.Sprintf("address=%q: %s", address, why))
 	}
 	admin, found, err := s.st.AdminByAddress(address)
 	if err != nil {
 		return "", err
 	}
+	usable := found && admin.Hash != ""
 	hash := s.fake
-	if found && admin.Hash != "" {
+	if usable {
 		hash = []byte(admin.Hash)
 	}
 	// bcrypt refuses more than 72 bytes outright; such a password was never
@@ -328,7 +386,7 @@ func (s *Service) passwordAndCode(from, what, address, password, code string) (s
 		password, hash = "", s.fake
 	}
 	passwordOK := bcrypt.CompareHashAndPassword(hash, []byte(password)) == nil
-	if !found || admin.Hash == "" || !passwordOK {
+	if !usable || !passwordOK {
 		return refuse("wrong address or password")
 	}
 	s.codes.Lock()
@@ -405,7 +463,11 @@ func (s *Service) ChangePassword(sess store.Session, pw, pw2 string) error {
 	if !s.Fresh(sess) {
 		return errStale
 	}
-	hash, err := s.hashPassword(pw, pw2)
+	password, err := checkedPassword(pw, pw2)
+	if err != nil {
+		return err
+	}
+	hash, err := s.hash(password)
 	if err != nil {
 		return err
 	}

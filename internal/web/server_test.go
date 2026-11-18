@@ -58,7 +58,7 @@ func (u *ui) code(secret string) string {
 // and returns the admin's authenticator key and a signed-in session.
 func (u *ui) enrol(address string) (secret, session string) {
 	u.t.Helper()
-	token, err := u.auth.AddAdmin("cli:test", address)
+	_, token, err := u.auth.AddAdmin("cli:test", address)
 	if err != nil {
 		u.t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func newUI(t *testing.T) *ui {
 		u.log = append(u.log, fmt.Sprintf(format, args...))
 		t.Logf(format, args...)
 	}
-	u.auth, err = auth.New(admin.Store(), auth.Config{AdminHost: adminHost, Origin: "https://" + adminHost, Now: func() time.Time { return u.now }, Logf: logf, BcryptCost: bcrypt.MinCost, NoFailureDelay: true})
+	u.auth, err = auth.New(admin.Store(), auth.Config{AdminHost: adminHost, Origin: "https://" + adminHost, Now: func() time.Time { return u.now }, Logf: logf, BcryptCost: bcrypt.MinCost, Sleep: func(time.Duration) {}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,14 +145,7 @@ func (u *ui) get(path string) resp { return u.do(http.MethodGet, path, nil, nil)
 
 func (u *ui) token() string {
 	u.t.Helper()
-	body := u.get("/mailboxes").body
-	const marker = `name="csrf" value="`
-	i := strings.Index(body, marker)
-	if i < 0 {
-		u.t.Fatalf("no csrf field in:\n%s", body)
-	}
-	rest := body[i+len(marker):]
-	return rest[:strings.Index(rest, `"`)]
+	return csrfIn(u.t, u.get("/mailboxes").body)
 }
 
 // post submits a change with a valid token, follows the redirect and returns the flashed page.
@@ -199,7 +192,7 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 			{"POST", "/mailboxes/add"}, {"POST", "/mailboxes/password"}, {"POST", "/mailboxes/state"}, {"POST", "/mailboxes/remove"},
 			{"GET", "/aliases"}, {"GET", "/aliases/edit?address=a@example.test"}, {"POST", "/aliases/add"}, {"POST", "/aliases/targets"}, {"POST", "/aliases/remove"},
 			{"POST", "/sendas/add"}, {"POST", "/sendas/remove"},
-			{"GET", "/domains"}, {"GET", "/sendas"}, {"GET", "/log"}, {"GET", "/no/such/page"},
+			{"GET", "/domains"}, {"GET", "/sendas"}, {"GET", "/log"},
 			{"GET", "/account"}, {"POST", "/account/authenticator/new"}, {"GET", "/account/authenticator/qr"}, {"GET", "/handoff"},
 			{"POST", "/signout"}, {"POST", "/account/prove"}, {"POST", "/account/password"}, {"POST", "/account/authenticator"},
 			{"POST", "/account/passkeys/begin"}, {"POST", "/account/passkeys/finish"}, {"POST", "/account/passkeys/remove"},
@@ -216,6 +209,13 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 			case tc.method == "POST" && (r.code != http.StatusForbidden || strings.TrimSpace(r.body) != "forbidden"):
 				t.Errorf("%s %s with session %q: %d %q, want bare 403", tc.method, tc.path, session, r.code, r.body)
 			}
+		}
+	}
+	// A path that is no page of ours is not worth a redirect: browsers ask for
+	// icons on every page load.
+	for _, path := range []string{"/no/such/page", "/favicon.ico", "/signout"} {
+		if r := u.get(path); r.code != http.StatusNotFound {
+			t.Errorf("signed-out GET %s: %d, want 404", path, r.code)
 		}
 	}
 	u.session = signedIn

@@ -364,17 +364,17 @@ func (e *env) adminAccounts(a *generate.Admin, args []string) error {
 	if err != nil {
 		return err
 	}
-	address := strings.ToLower(strings.TrimSpace(rest[0]))
-	var token, done string
+	var address, token, done string
 	switch args[0] {
 	case "add":
-		token, err = service.AddAdmin(e.actor(), address)
+		address, token, err = service.AddAdmin(e.actor(), rest[0])
 		done = "added admin " + address
 	case "reset":
-		token, err = service.ResetAdmin(e.actor(), address)
+		address, token, err = service.ResetAdmin(e.actor(), rest[0])
 		done = "reset admin " + address + "; the password, authenticator, passkeys and sessions are gone"
 	default:
-		return e.ok("removed admin "+address, service.RemoveAdmin(e.actor(), address))
+		address, err = service.RemoveAdmin(e.actor(), rest[0])
+		return e.ok("removed admin "+address, err)
 	}
 	if err != nil {
 		return err

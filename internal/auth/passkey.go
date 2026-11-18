@@ -49,7 +49,7 @@ func (s *Service) startCeremony(c ceremony) (string, error) {
 		}
 	}
 	if held >= maxCeremoniesPerVisitor {
-		s.cfg.Logf("sign-in failed from=%s: too many passkey challenges requested", c.from)
+		s.refused("sign-in", c.from, "passkey: too many challenges requested")
 		return "", Problem("too many passkey requests; wait a few minutes and try again")
 	}
 	if len(s.ceremonies) >= maxCeremonies {
@@ -57,6 +57,16 @@ func (s *Service) startCeremony(c ceremony) (string, error) {
 	}
 	s.ceremonies[id] = c
 	return id, nil
+}
+
+// DropCeremony forgets a challenge that will not be answered: the browser
+// that held it has asked for another, as it does when a prompt is cancelled
+// and the button pressed again. Without this, cancelling a few times would
+// use up the visitor's allowance and be logged as failed sign-ins.
+func (s *Service) DropCeremony(id string) {
+	s.mu.Lock()
+	delete(s.ceremonies, id)
+	s.mu.Unlock()
 }
 
 // takeCeremony uses a ceremony up: a challenge is answered once.
@@ -204,8 +214,7 @@ func (s *Service) BeginPasskeySignIn(from string) (options any, id string, err e
 func (s *Service) finishAssertion(from, what, id string, r *http.Request) (string, error) {
 	c, ok := s.takeCeremony(id)
 	if !ok || c.admin != "" {
-		s.cfg.Logf("%s failed from=%s: passkey challenge unknown or expired", what, from)
-		return "", ErrSignIn
+		return "", s.refused(what, from, "passkey: challenge unknown or expired")
 	}
 	found, credential, err := s.wa.FinishPasskeyLogin(func(_, handle []byte) (webauthn.User, error) {
 		account, ok, err := s.st.AdminByHandle(handle)
@@ -218,8 +227,7 @@ func (s *Service) finishAssertion(from, what, id string, r *http.Request) (strin
 		return s.loadUser(account)
 	}, c.data, r)
 	if err != nil {
-		s.cfg.Logf("%s failed from=%s: passkey: %v", what, from, err)
-		return "", ErrSignIn
+		return "", s.refused(what, from, fmt.Sprintf("passkey: %v", err))
 	}
 	// The record holds the sign counter and backup flags, which a sign-in may
 	// change. A counter that does not rise is normal for a synced passkey and
@@ -248,8 +256,7 @@ func (s *Service) ProveWithPasskey(from string, sess store.Session, id string, r
 		return err
 	}
 	if address != sess.Admin {
-		s.cfg.Logf("proof failed from=%s: passkey belongs to another admin", from)
-		return ErrSignIn
+		return s.refused("proof", from, "passkey: belongs to another admin")
 	}
 	return s.st.MarkProved(sess.IDHash, s.cfg.Now())
 }

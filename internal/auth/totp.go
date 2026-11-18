@@ -55,7 +55,7 @@ func totpURI(issuer, account string, secret []byte) string {
 }
 
 // CodeAt returns the code an authenticator holding the base32 secret shows at
-// a given time. The server never needs it; tests and the CI stack do.
+// a given time. The server never needs it; the web package's tests do.
 func CodeAt(secret string, at time.Time) (string, error) {
 	raw, err := secretEncoding.DecodeString(strings.ToUpper(strings.TrimSpace(secret)))
 	if err != nil {

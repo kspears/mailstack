@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -33,5 +34,16 @@ func TestTOTPMatchAllowsOneStepOfDrift(t *testing.T) {
 	}
 	if _, ok := totpMatch(nil, "081804", now); ok {
 		t.Error("an account with no authenticator accepted a code")
+	}
+}
+
+func TestSingleLineKeepsOneCallToOneLine(t *testing.T) {
+	var lines []string
+	logf := SingleLine(func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) })
+	logf("passkey: %v", "bad origin\n2026/11/18 09:00:00 sign-in failed from=198.51.100.9 x\r y")
+	logf("100%% literal %s", "%d")
+	want := []string{"passkey: bad origin 2026/11/18 09:00:00 sign-in failed from=198.51.100.9 x  y", "100% literal %d"}
+	if len(lines) != 2 || lines[0] != want[0] || lines[1] != want[1] {
+		t.Errorf("got %q, want %q", lines, want)
 	}
 }
