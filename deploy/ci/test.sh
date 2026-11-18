@@ -126,4 +126,23 @@ probe auth-needs-tls alice@example.test "$PASSWORD"
 probe submission-ok alice@example.test "$PASSWORD"
 probe forged-sender alice@example.test "$PASSWORD"
 
+step "the admin UI and the rspamd UI, through the proxy"
+docker compose up -d ui proxy
+probe wait proxy:443
+link=$(mailctl admin add webadmin@example.test | tail -n 1)
+case "$link" in
+	https://admin.example.test/enrol\?t=*) ;;
+	*) echo "FAIL: mailctl admin add printed no enrolment link"; exit 1 ;;
+esac
+docker compose run --rm -T --no-deps --entrypoint python probe -I /webprobe.py "${link#*t=}"
+# The failed sign-in claimed to come from 203.0.113.99. The proxy must have replaced that
+# with the address it saw the connection come from, on the edge network.
+ui_log=$(docker compose logs --no-color ui)
+case "$ui_log" in *203.0.113.99*) echo "FAIL: the UI believed a visitor-supplied address"; exit 1 ;; esac
+case "$ui_log" in
+	*"sign-in failed from=10.254.77."*) echo "ok: a failed sign-in is logged with the address the proxy saw" ;;
+	*) echo "FAIL: no failed sign-in logged with the visitor's address"; exit 1 ;;
+esac
+case "$ui_log" in *"${link#*t=}"*) echo "FAIL: the UI logged the enrolment token"; exit 1 ;; esac
+
 printf '\nall checks passed\n'

@@ -1,0 +1,46 @@
+# The web front door of the reference stack: TLS ends here, and the admin UI and rspamd's
+# UI behind it speak plain HTTP on the compose network. A deployment copies this file and
+# changes three things: the hostnames, `tls internal` (drop it, so certificates come from
+# a public authority), and the note on logging below.
+{
+	# Nothing on this network should be able to reconfigure the proxy.
+	admin off
+	# Nothing listens on port 80: no redirect, and no certificate challenge answered there.
+	auto_https disable_redirects
+	servers {
+		# A request must name the same host in TLS and in HTTP, so one site's
+		# certificate cannot be used to reach another site's backend.
+		strict_sni_host on
+	}
+}
+
+(hsts) {
+	header Strict-Transport-Security "max-age=31536000"
+}
+
+admin.example.test {
+	tls internal
+	import hsts
+	reverse_proxy ui:8080
+}
+
+rspamd.example.test {
+	tls internal
+	import hsts
+	# mailctl's half of the gate. rspamd's own controller serves /auth, which is why
+	# these paths have a prefix rspamd will never use.
+	handle /_mailstack/* {
+		reverse_proxy ui:8080
+	}
+	# Everything else reaches rspamd only after mailctl says the visitor holds an rspamd
+	# session. Its answer when they do not, a redirect into the sign-in, goes to the browser.
+	handle {
+		forward_auth ui:8080 {
+			uri /_mailstack/check
+		}
+		reverse_proxy rspamd:11334
+	}
+}
+
+# No access log is configured. If a deployment adds one, it must not record query strings
+# for /_mailstack/finish or /enrol: both carry a single-use secret there.
