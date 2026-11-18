@@ -8,9 +8,9 @@ default:
 setup:
     go mod download
 
-# Run the admin UI locally against a scratch state directory
+# Run the admin UI on http://localhost:8080; make an admin first (README, "Running it locally")
 dev *args:
-    go run ./cmd/mailctl serve "$@"
+    MAILCTL_DEV=1 MAILCTL_ADMIN_HOST=localhost:8080 MAILCTL_LISTEN=127.0.0.1:8080 go run ./cmd/mailctl serve "$@"
 
 # Full CI gate: formatting, vet, tests, build
 check: lint test build

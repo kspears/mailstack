@@ -8,13 +8,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os/signal"
 	"slices"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/kspears/mailstack/internal/access"
+	"github.com/kspears/mailstack/internal/auth"
 	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/web"
 )
@@ -24,9 +25,12 @@ func (e *env) serve(args []string) error {
 		return usageError("serve")
 	}
 	listen := cmp.Or(e.getenv("MAILCTL_LISTEN"), ":8080")
-	id, err := e.identifier(listen)
+	site, err := e.site()
 	if err != nil {
 		return err
+	}
+	if site.insecure && !loopback(listen) {
+		return fmt.Errorf("MAILCTL_DEV=1 sends cookies over plain HTTP, so it is only allowed when MAILCTL_LISTEN is a loopback address such as 127.0.0.1:8080, not %q", listen)
 	}
 	cfg, err := generate.ConfigFromEnv(e.getenv)
 	if err != nil {
@@ -39,7 +43,14 @@ func (e *env) serve(args []string) error {
 	defer admin.Close()
 
 	logger := log.New(e.stdout, "", log.LstdFlags)
-	handler, err := web.New(web.Config{Admin: admin, Identifier: id, Logf: logger.Printf})
+	service, err := site.service(admin, logger.Printf)
+	if err != nil {
+		return err
+	}
+	handler, err := web.New(web.Config{
+		Admin: admin, Auth: service, AdminHost: site.adminHost, RspamdHost: site.rspamdHost, Insecure: site.insecure,
+		TrustedProxy: site.proxy, ClientAddrHeader: site.addrHeader, Logf: logger.Printf,
+	})
 	if err != nil {
 		return err
 	}
@@ -62,44 +73,51 @@ func (e *env) serve(args []string) error {
 		defer cancel()
 		srv.Shutdown(shutdown)
 	}()
-	logger.Printf("serving the admin UI on %s", ln.Addr())
+	logger.Printf("serving the admin UI for %s on %s", site.adminHost, ln.Addr())
 	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
-// identifier builds the request identifier from the environment. The dev
-// identity is only honoured on a loopback listen address.
-func (e *env) identifier(listen string) (access.Identifier, error) {
-	if dev := e.getenv("MAILCTL_DEV_IDENTITY"); dev != "" {
-		if !loopback(listen) {
-			return nil, fmt.Errorf("MAILCTL_DEV_IDENTITY skips sign-in, so it is only allowed when MAILCTL_LISTEN is a loopback address such as 127.0.0.1:8080, not %q", listen)
-		}
-		return access.Dev{Email: dev}, nil
+// site is where the UI is served, read from the environment. The command line
+// needs it too: an enrolment link has to name the hostname.
+type site struct {
+	adminHost, rspamdHost string
+	insecure              bool
+	proxy                 netip.Addr
+	addrHeader            string
+}
+
+func (e *env) site() (site, error) {
+	s := site{
+		adminHost:  strings.ToLower(e.getenv("MAILCTL_ADMIN_HOST")),
+		rspamdHost: strings.ToLower(e.getenv("MAILCTL_RSPAMD_HOST")),
+		insecure:   e.getenv("MAILCTL_DEV") == "1",
+		addrHeader: cmp.Or(e.getenv("MAILCTL_CLIENT_ADDR_HEADER"), "X-Forwarded-For"),
 	}
-	team := e.getenv("MAILCTL_ACCESS_TEAM_DOMAIN")
-	aud := e.getenv("MAILCTL_ACCESS_AUD")
-	var admins []string
-	for _, a := range strings.Split(e.getenv("MAILCTL_ADMINS"), ",") {
-		if a = strings.TrimSpace(a); a != "" {
-			admins = append(admins, a)
-		}
+	if s.adminHost == "" {
+		return s, errors.New("MAILCTL_ADMIN_HOST is not set; it is the hostname the admin UI is served on, for example admin.example.test")
 	}
-	for _, need := range []struct {
-		name  string
-		unset bool
-		hint  string
-	}{
-		{"MAILCTL_ACCESS_TEAM_DOMAIN", team == "", "the Cloudflare Access team domain, for example example.cloudflareaccess.com"},
-		{"MAILCTL_ACCESS_AUD", aud == "", "the Access application audience tag"},
-		{"MAILCTL_ADMINS", len(admins) == 0, "comma-separated admin emails"},
-	} {
-		if need.unset {
-			return nil, fmt.Errorf("%s is not set; it is %s", need.name, need.hint)
+	if proxy := e.getenv("MAILCTL_TRUSTED_PROXY"); proxy != "" {
+		addr, err := netip.ParseAddr(proxy)
+		if err != nil {
+			return s, fmt.Errorf("MAILCTL_TRUSTED_PROXY=%q is not one IP address; a network is not accepted, because every host on it could then name the address that gets banned", proxy)
 		}
+		s.proxy = addr
 	}
-	return access.NewCloudflare(team, aud, admins), nil
+	return s, nil
+}
+
+func (s site) origin() string {
+	if s.insecure {
+		return "http://" + s.adminHost
+	}
+	return "https://" + s.adminHost
+}
+
+func (s site) service(admin *generate.Admin, logf func(string, ...any)) (*auth.Service, error) {
+	return auth.New(admin.Store(), auth.Config{AdminHost: s.adminHost, Origin: s.origin(), Logf: logf})
 }
 
 func loopback(listen string) bool {

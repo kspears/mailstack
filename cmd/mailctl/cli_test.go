@@ -14,7 +14,7 @@ func TestCLI(t *testing.T) {
 	state, mail := t.TempDir(), t.TempDir()
 	vars := map[string]string{
 		"MAILCTL_STATE": state, "MAILCTL_MAIL_ROOT": mail, "MAILCTL_WATCHER": "off",
-		"SUDO_USER": "alex", "USER": "root",
+		"SUDO_USER": "alex", "USER": "root", "MAILCTL_ADMIN_HOST": "admin.example.test",
 	}
 	getenv := func(k string) string { return vars[k] }
 	mailPath := filepath.Join(mail, "example.test", "alice")
@@ -50,7 +50,14 @@ func TestCLI(t *testing.T) {
 		{"remove mailbox", []string{"alias", "remove", "info@example.test"}, "", 0, "ok: removed alias info@example.test\n", "", false},
 		{"remove mailbox keeps mail", []string{"mailbox", "remove", "bob@example.test"}, "", 0, "ok: removed bob@example.test; mail left in place at " + filepath.Join(mail, "example.test", "bob") + "\n", "", false},
 		{"apply", []string{"apply"}, "", 0, "ok: applied current account set\n", "", false},
-		{"serve needs access settings", []string{"serve"}, "", 1, "", "error: MAILCTL_ACCESS_TEAM_DOMAIN is not set", false},
+		{"admin add", []string{"admin", "add", "Sam@Example.test"}, "", 0, "ok: added admin sam@example.test\nEnrolment link, valid for 24 hours and shown only now. Send it by a channel you trust:\nhttps://admin.example.test/enrol?t=", "", true},
+		{"admin add twice", []string{"admin", "add", "sam@example.test"}, "", 1, "", "error: admin sam@example.test already exists; use `mailctl admin reset` for a new enrolment link\n", false},
+		{"admin add malformed", []string{"admin", "add", "sam"}, "", 1, "", "error: invalid address \"sam\": expected local@domain\n", false},
+		{"admin list", []string{"admin", "list"}, "", 0, "sam@example.test  not enrolled  0 passkeys\n", "", false},
+		{"admin reset", []string{"admin", "reset", "sam@example.test"}, "", 0, "ok: reset admin sam@example.test; the password, authenticator, passkeys and sessions are gone\nEnrolment link", "", true},
+		{"admin reset unknown", []string{"admin", "reset", "nobody@example.test"}, "", 1, "", "error: admin nobody@example.test does not exist\n", false},
+		{"admin remove", []string{"admin", "remove", "sam@example.test"}, "", 0, "ok: removed admin sam@example.test\n", "", false},
+		{"admin usage", []string{"admin", "add"}, "", 2, "", "error: usage: mailctl admin list|add <address>|reset <address>|remove <address>\n", false},
 		{"unknown command", []string{"frobnicate"}, "", 2, "", "error: usage: mailctl ", false},
 		{"mailbox list", []string{"mailbox", "list"}, "", 0, "alice@example.test  active  Alice A\n", "", false},
 		{"alias list", []string{"alias", "list"}, "", 0, "", "", false},
@@ -60,7 +67,8 @@ func TestCLI(t *testing.T) {
 	for _, s := range steps {
 		var out, errOut bytes.Buffer
 		code := run(s.args, getenv, strings.NewReader(s.stdin), &out, &errOut)
-		if code != s.code || out.String() != s.stdout || !strings.HasPrefix(errOut.String(), s.stderr) {
+		stdoutOK := out.String() == s.stdout || s.stdoutPart && strings.HasPrefix(out.String(), s.stdout)
+		if code != s.code || !stdoutOK || !strings.HasPrefix(errOut.String(), s.stderr) {
 			t.Errorf("%s: code %d stdout %q stderr %q; want code %d stdout %q stderr %q",
 				s.name, code, out.String(), errOut.String(), s.code, s.stdout, s.stderr)
 		}

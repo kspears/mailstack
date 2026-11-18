@@ -16,7 +16,7 @@ internal/store/     SQLite store, schema, change log
 internal/validate/  address rules, alias loops, collisions
 internal/generate/  render lookup files; all-or-nothing apply
 internal/web/       server-rendered admin UI
-internal/access/    turns a request into an admin identity (Cloudflare Access today)
+internal/auth/      the UI's own sign-in: passwords with an authenticator code, passkeys, sessions
 images/postfix/     postfix image: Debian, the distro package, a reload watcher
 images/admin/       image for mailctl
 deploy/ci/          compose file used by the integration test
@@ -141,8 +141,8 @@ just check    the CI gate
 
 ## Web UI
 
-`mailctl serve` runs the admin UI. Every request must carry a valid Cloudflare Access
-token for an allow-listed admin; there is no login page.
+`mailctl serve` runs the admin UI. It speaks plain HTTP and expects a reverse proxy in front
+of it that ends TLS; it never listens on a public port itself.
 
 The UI covers the routine work: add, disable and remove mailboxes, reset passwords, add
 aliases and change where they deliver, and manage send-as grants. Both password forms offer
@@ -153,10 +153,83 @@ command line only.
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAILCTL_LISTEN` | `:8080` | listen address |
-| `MAILCTL_ACCESS_TEAM_DOMAIN` | required | Access team domain, for example `example.cloudflareaccess.com` |
-| `MAILCTL_ACCESS_AUD` | required | audience tag of the Access application |
-| `MAILCTL_ADMINS` | required | comma-separated emails allowed in; each change is logged under the signed-in email |
-| `MAILCTL_DEV_IDENTITY` | unset | an email to act as, with no sign-in; refused unless `MAILCTL_LISTEN` is loopback (`127.0.0.1:`, `localhost:`, `[::1]:`) |
+| `MAILCTL_ADMIN_HOST` | required | the hostname the UI is served on, for example `admin.example.test`; requests for any other host are refused, passkeys are bound to it, and enrolment links name it. The command line needs it too |
+| `MAILCTL_RSPAMD_HOST` | unset | the hostname rspamd's own UI is published on, if it is; see "The gate in front of rspamd" |
+| `MAILCTL_TRUSTED_PROXY` | unset | the proxy's IP address. Only a connection from exactly this address may say who the visitor is. One address, never a network |
+| `MAILCTL_CLIENT_ADDR_HEADER` | `X-Forwarded-For` | the header the proxy puts the visitor's address in; the last entry is used |
+| `MAILCTL_DEV` | unset | `1` serves over plain HTTP for local work: cookies lose `Secure` and the `__Host-` prefix. Refused unless `MAILCTL_LISTEN` is loopback (`127.0.0.1:`, `localhost:`, `[::1]:`) |
+
+### Signing in
+
+Admins are not mailboxes. An admin has a password of their own, an authenticator app, and
+any number of passkeys. There are two ways in, and a password alone is never one of them:
+
+- a passkey, with nothing typed;
+- address, password and the authenticator's six-digit code, on one form.
+
+Admins are made on the server, never in the UI:
+
+```
+mailctl admin add alex@example.test      # prints a one-time enrolment link
+mailctl admin reset alex@example.test    # strips every credential and session, prints a new link
+mailctl admin remove alex@example.test
+mailctl admin list
+```
+
+The link is valid for 24 hours and shown once; the store keeps only its hash. Opening it
+does not use it up, completing it does, and a newer link cancels an older one. Whoever
+completes it first holds the account, so send it by a channel you trust. Through it the
+admin sets a password and adds the account to an authenticator app; the operator never
+sees either. `reset` is also the way back in for a locked-out admin, and it needs no
+sign-in: it works with the UI stopped.
+
+What the sign-in does and does not do:
+
+- Every failure shows `Sign-in failed.` and nothing else, whether or not the address exists.
+- A code works once.
+- Ten right-password, wrong-code attempts in an hour stop password sign-in for that admin
+  until the hour passes. Wrong passwords do not count toward that, so nobody can lock an
+  admin out by guessing at their address. Passkey sign-in is never limited.
+- Guessing is slowed by address instead. Each failure is logged as one line starting
+  `sign-in failed from=<address>` (or `proof failed from=<address>`), which is what a
+  fail2ban filter should match.
+- A session lasts 12 hours and is kept on the server, so signing out, a reset and a removal
+  end it at once.
+- Changing a password, replacing the authenticator, and adding or removing a passkey need a
+  proof given in the last 5 minutes: a passkey, or password and code again.
+- Every request that changes anything must carry `Sec-Fetch-Site: same-origin`, which only a
+  browser showing one of the UI's own pages sends. A sibling hostname under the same domain
+  does not qualify.
+- Only the sign-in and account pages load a script (`/static/passkey.js`, from the UI's own
+  origin). Every other page is served with `default-src 'none'` and no script at all.
+- The authenticator secret has to be stored readable, so `store.db` holds it beside the
+  password hash. A passkey's private half never leaves the device.
+
+### The gate in front of rspamd
+
+rspamd's web UI shows text taken from mail, so it belongs on a hostname of its own, where a
+fault in its pages cannot act as the admin. With `MAILCTL_RSPAMD_HOST` set, the proxy asks
+`mailctl` before passing each request to rspamd:
+
+- `GET /_mailstack/check` answers 204 for a visitor holding an rspamd session, and
+  otherwise redirects to `/_mailstack/start` on the rspamd hostname. Use it as the proxy's
+  forward-auth target for that hostname.
+- Route `/_mailstack/*` on the rspamd hostname to `mailctl`, not to rspamd.
+
+A signed-in admin gets an rspamd session through a hand-off between the two hostnames. That
+session's cookie opens the rspamd UI and nothing else, the admin cookie is never sent to the
+rspamd hostname, and the rspamd session ends with the admin session it came from. The
+hand-off ticket travels in a query string once, so keep the proxy from logging query
+strings on `/_mailstack/finish`.
+
+### Running it locally
+
+`just dev` serves on `http://localhost:8080` against `MAILCTL_STATE`. Make yourself an
+admin first, with the same settings, and open the link it prints:
+
+```
+MAILCTL_DEV=1 MAILCTL_ADMIN_HOST=localhost:8080 go run ./cmd/mailctl admin add you@example.test
+```
 
 ## Importing from mailcow
 

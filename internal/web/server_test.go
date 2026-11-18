@@ -1,43 +1,76 @@
 package web
 
 import (
-	"errors"
+	"fmt"
 	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/kspears/mailstack/internal/access"
+	"github.com/kspears/mailstack/internal/auth"
 	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/store"
 )
 
 const (
 	adminEmail = "admin@example.test"
+	adminPw    = "the admin's own long password"
 	pw         = "correct horse battery staple"
 )
 
-type headerID struct{}
-
-func (headerID) Identify(r *http.Request) (string, error) {
-	if who := r.Header.Get("X-Test-Actor"); who != "" {
-		return who, nil
-	}
-	return "", errors.New("no test identity")
-}
+const (
+	adminHost  = "mail.example.test"
+	rspamdHost = "rspamd.example.test"
+)
 
 type ui struct {
-	t     *testing.T
-	admin *generate.Admin
-	h     http.Handler
-	flash *http.Cookie
+	t       *testing.T
+	admin   *generate.Admin
+	auth    *auth.Service
+	h       http.Handler
+	flash   *http.Cookie
+	session string // the signed-in admin's cookie value; empty sends none
+	secret  string // that admin's authenticator key
+	now     time.Time
+	log     []string
+}
+
+// code is what the admin's authenticator shows at the test's current time.
+func (u *ui) code(secret string) string {
+	u.t.Helper()
+	c, err := auth.CodeAt(secret, u.now)
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	return c
+}
+
+// enrol makes an admin the way the operator and the admin do between them,
+// and returns the admin's authenticator key and a signed-in session.
+func (u *ui) enrol(address string) (secret, session string) {
+	u.t.Helper()
+	token, err := u.auth.AddAdmin("cli:test", address)
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	e, ok, err := u.auth.Enrolment(token)
+	if err != nil || !ok {
+		u.t.Fatalf("enrolment link: %v %v", ok, err)
+	}
+	session, err = u.auth.Enrol(token, adminPw, adminPw, u.code(e.Secret))
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	return e.Secret, session
 }
 
 func newUI(t *testing.T) *ui {
@@ -51,11 +84,22 @@ func newUI(t *testing.T) *ui {
 	if _, err := admin.AddDomain("cli:test", "example.test"); err != nil {
 		t.Fatal(err)
 	}
-	h, err := New(Config{Admin: admin, Identifier: headerID{}, Logf: t.Logf})
+	u := &ui{t: t, admin: admin, now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
+	logf := func(format string, args ...any) {
+		u.log = append(u.log, fmt.Sprintf(format, args...))
+		t.Logf(format, args...)
+	}
+	u.auth, err = auth.New(admin.Store(), auth.Config{AdminHost: adminHost, Origin: "https://" + adminHost, Now: func() time.Time { return u.now }, Logf: logf, BcryptCost: bcrypt.MinCost})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &ui{t: t, admin: admin, h: h}
+	u.h, err = New(Config{Admin: admin, Auth: u.auth, AdminHost: adminHost, RspamdHost: rspamdHost,
+		TrustedProxy: netip.MustParseAddr("192.0.2.1"), ClientAddrHeader: "X-Forwarded-For", Logf: logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.secret, u.session = u.enrol(adminEmail)
+	return u
 }
 
 type resp struct {
@@ -71,11 +115,12 @@ func (u *ui) do(method, path string, form url.Values, mod func(*http.Request)) r
 		body = strings.NewReader(form.Encode())
 	}
 	r := httptest.NewRequest(method, path, body)
-	r.Host = "mail.example.test"
-	r.Header.Set("X-Test-Actor", adminEmail)
+	r.Host = adminHost
+	if u.session != "" {
+		r.AddCookie(&http.Cookie{Name: "__Host-" + sessionCookie, Value: u.session})
+	}
 	if form != nil {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		r.Header.Set("Origin", "https://mail.example.test")
 		r.Header.Set("Sec-Fetch-Site", "same-origin")
 	}
 	if u.flash != nil {
@@ -88,7 +133,7 @@ func (u *ui) do(method, path string, form url.Values, mod func(*http.Request)) r
 	u.h.ServeHTTP(w, r)
 	u.flash = nil
 	for _, c := range w.Result().Cookies() {
-		if c.Name == flashCookie && c.MaxAge > 0 {
+		if c.Name == "__Host-"+flashCookie && c.MaxAge > 0 {
 			u.flash = c
 		}
 	}
@@ -144,25 +189,38 @@ func (u *ui) addAlice() {
 	}
 }
 
-func TestEveryRouteNeedsIdentity(t *testing.T) {
+func TestEveryRouteNeedsASession(t *testing.T) {
 	u := newUI(t)
-	for _, tc := range []struct{ method, path string }{
-		{"GET", "/"}, {"GET", "/mailboxes"}, {"GET", "/mailboxes/edit?address=a@example.test"}, {"GET", "/mailboxes/remove?address=a@example.test"},
-		{"POST", "/mailboxes/add"}, {"POST", "/mailboxes/password"}, {"POST", "/mailboxes/state"}, {"POST", "/mailboxes/remove"},
-		{"GET", "/aliases"}, {"GET", "/aliases/edit?address=a@example.test"}, {"POST", "/aliases/add"}, {"POST", "/aliases/targets"}, {"POST", "/aliases/remove"},
-		{"POST", "/sendas/add"}, {"POST", "/sendas/remove"},
-		{"GET", "/domains"}, {"GET", "/sendas"}, {"GET", "/log"},
-		{"GET", "/static/style.css"}, {"GET", "/static/nope.css"}, {"GET", "/no/such/page"},
-	} {
-		r := httptest.NewRequest(tc.method, tc.path, nil)
-		w := httptest.NewRecorder()
-		u.h.ServeHTTP(w, r)
-		if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != "forbidden" {
-			t.Errorf("%s %s: %d %q, want bare 403", tc.method, tc.path, w.Code, w.Body.String())
+	signedIn := u.session
+	for _, session := range []string{"", "not-a-session", signedIn + "x"} {
+		u.session = session
+		for _, tc := range []struct{ method, path string }{
+			{"GET", "/"}, {"GET", "/mailboxes"}, {"GET", "/mailboxes/edit?address=a@example.test"}, {"GET", "/mailboxes/remove?address=a@example.test"},
+			{"POST", "/mailboxes/add"}, {"POST", "/mailboxes/password"}, {"POST", "/mailboxes/state"}, {"POST", "/mailboxes/remove"},
+			{"GET", "/aliases"}, {"GET", "/aliases/edit?address=a@example.test"}, {"POST", "/aliases/add"}, {"POST", "/aliases/targets"}, {"POST", "/aliases/remove"},
+			{"POST", "/sendas/add"}, {"POST", "/sendas/remove"},
+			{"GET", "/domains"}, {"GET", "/sendas"}, {"GET", "/log"}, {"GET", "/no/such/page"},
+			{"GET", "/account"}, {"GET", "/account/authenticator"}, {"GET", "/account/authenticator/qr"}, {"GET", "/handoff"},
+			{"POST", "/signout"}, {"POST", "/account/prove"}, {"POST", "/account/password"}, {"POST", "/account/authenticator"},
+			{"POST", "/account/passkeys/begin"}, {"POST", "/account/passkeys/finish"}, {"POST", "/account/passkeys/remove"},
+			{"POST", "/account/prove/passkey/begin"}, {"POST", "/account/prove/passkey/finish"},
+		} {
+			var form url.Values
+			if tc.method == "POST" {
+				form = url.Values{}
+			}
+			r := u.do(tc.method, tc.path, form, nil)
+			switch {
+			case tc.method == "GET" && (r.code != http.StatusSeeOther || r.header.Get("Location") != "/signin"):
+				t.Errorf("%s %s with session %q: %d to %q, want a redirect to /signin", tc.method, tc.path, session, r.code, r.header.Get("Location"))
+			case tc.method == "POST" && (r.code != http.StatusForbidden || strings.TrimSpace(r.body) != "forbidden"):
+				t.Errorf("%s %s with session %q: %d %q, want bare 403", tc.method, tc.path, session, r.code, r.body)
+			}
 		}
 	}
+	u.session = signedIn
 	if r := u.get("/no/such/page"); r.code != http.StatusNotFound {
-		t.Errorf("unknown path with identity: %d, want 404", r.code)
+		t.Errorf("unknown path when signed in: %d, want 404", r.code)
 	}
 }
 
@@ -279,24 +337,32 @@ func TestValidationFailuresChangeNothing(t *testing.T) {
 
 func TestCSRFRefusals(t *testing.T) {
 	u := newUI(t)
+	_, other := u.enrol("other@example.test")
 	good := func() url.Values {
 		return url.Values{"csrf": {u.token()}, "address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}
+	}
+	site := func(v string) func(*http.Request) {
+		return func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", v) }
 	}
 	for name, tc := range map[string]struct {
 		form url.Values
 		mod  func(*http.Request)
 	}{
-		// Without fetch metadata the Origin, or failing that the Referer, must match.
-		"foreign origin":            {good(), noMeta(func(r *http.Request) { r.Header.Set("Origin", "https://evil.example.org") })},
-		"null origin":               {good(), noMeta(func(r *http.Request) { r.Header.Set("Origin", "null") })},
-		"foreign referer":           {good(), noMeta(func(r *http.Request) { r.Header.Del("Origin"); r.Header.Set("Referer", "https://evil.example.org/x") })},
-		"no origin/referer":         {good(), noMeta(func(r *http.Request) { r.Header.Del("Origin") })},
-		"user-initiated, no origin": {good(), func(r *http.Request) { r.Header.Del("Origin"); r.Header.Set("Sec-Fetch-Site", "none") }},
-		"cross-site fetch":          {good(), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }},
-		"same-site fetch":           {good(), func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") }},
-		"missing token":             {url.Values{"address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
-		"wrong token":               {url.Values{"csrf": {"deadbeef"}, "address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
-		"another identity's token":  {good(), func(r *http.Request) { r.Header.Set("X-Test-Actor", "other@example.test") }},
+		// Only the browser's own word that the page making the request is ours
+		// will do. A sibling hostname under the same domain is "same-site".
+		"cross-site":          {good(), site("cross-site")},
+		"same-site":           {good(), site("same-site")},
+		"typed or bookmarked": {good(), site("none")},
+		"no metadata, matching origin": {good(), func(r *http.Request) {
+			r.Header.Del("Sec-Fetch-Site")
+			r.Header.Set("Origin", "https://"+adminHost)
+		}},
+		"missing token": {url.Values{"address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
+		"wrong token":   {url.Values{"csrf": {"deadbeef"}, "address": {"bob@example.test"}, "password": {pw}, "password2": {pw}}, nil},
+		"another session's token": {good(), func(r *http.Request) {
+			r.Header.Del("Cookie")
+			r.AddCookie(&http.Cookie{Name: "__Host-" + sessionCookie, Value: other})
+		}},
 	} {
 		if r := u.do(http.MethodPost, "/mailboxes/add", tc.form, tc.mod); r.code != http.StatusForbidden {
 			t.Errorf("%s: status %d, want 403", name, r.code)
@@ -305,31 +371,8 @@ func TestCSRFRefusals(t *testing.T) {
 	if len(u.snapshot().Mailboxes) != 0 {
 		t.Error("a refused request created a mailbox")
 	}
-	// What real browsers send. The second is a same-origin form under a strict referrer
-	// policy: no usable Origin, but the browser's own word that it is same-origin.
-	for name, mod := range map[string]func(*http.Request){
-		"same-origin Referer, no metadata": noMeta(func(r *http.Request) {
-			r.Header.Del("Origin")
-			r.Header.Set("Referer", "https://mail.example.test/mailboxes")
-		}),
-		"null Origin with same-origin metadata": func(r *http.Request) { r.Header.Set("Origin", "null") },
-	} {
-		form := good()
-		form.Set("address", strings.ReplaceAll(strings.Fields(name)[0], "-", "")+"@example.test")
-		if r := u.do(http.MethodPost, "/mailboxes/add", form, mod); r.code != http.StatusSeeOther {
-			t.Errorf("%s: status %d, want 303", name, r.code)
-		}
-	}
-	if n := len(u.snapshot().Mailboxes); n != 2 {
-		t.Errorf("accepted posts created %d mailboxes, want 2", n)
-	}
-}
-
-// noMeta makes a request look like one from a browser that sends no fetch metadata.
-func noMeta(mod func(*http.Request)) func(*http.Request) {
-	return func(r *http.Request) {
-		r.Header.Del("Sec-Fetch-Site")
-		mod(r)
+	if r := u.do(http.MethodPost, "/mailboxes/add", good(), nil); r.code != http.StatusSeeOther || len(u.snapshot().Mailboxes) != 1 {
+		t.Errorf("a same-origin post with the right token: status %d", r.code)
 	}
 }
 
@@ -378,7 +421,7 @@ func TestSecurityHeadersAndReadOnlyPages(t *testing.T) {
 	for _, p := range []string{"/mailboxes", "/aliases", "/domains", "/sendas", "/log", "/static/style.css", "/no/such/page"} {
 		r := u.get(p)
 		for k, v := range map[string]string{
-			"Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+			"Content-Security-Policy": csp,
 			"X-Content-Type-Options":  "nosniff",
 			"Referrer-Policy":         "same-origin",
 			"Cache-Control":           "no-store",
@@ -388,7 +431,7 @@ func TestSecurityHeadersAndReadOnlyPages(t *testing.T) {
 			}
 		}
 	}
-	if d := u.get("/domains"); !strings.Contains(d.body, "example.test") || !strings.Contains(d.body, "added from the command line") || strings.Contains(d.body, "<form") {
+	if d := u.get("/domains"); !strings.Contains(d.body, "example.test") || !strings.Contains(d.body, "added from the command line") || strings.Count(d.body, "<form") != 1 { // only the sign-out button
 		t.Errorf("domains page:\n%s", d.body)
 	}
 }
@@ -401,26 +444,13 @@ func TestBodyLimit(t *testing.T) {
 	}
 }
 
-func TestDevIdentifierServes(t *testing.T) {
-	u := newUI(t)
-	h, err := New(Config{Admin: u.admin, Identifier: access.Dev{Email: "dev@example.test"}, Logf: t.Logf})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/mailboxes", nil))
-	if w.Code != http.StatusOK {
-		t.Errorf("status %d", w.Code)
-	}
-}
-
 func checkPassword(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(strings.TrimPrefix(hash, store.HashPrefix)), []byte(password)) == nil
 }
 
 func TestSendAsLifecycle(t *testing.T) {
 	u := newUI(t)
-	if s := u.get("/sendas"); strings.Contains(s.body, "<form") {
+	if s := u.get("/sendas"); strings.Contains(s.body, `action="/sendas/add"`) {
 		t.Error("send-as page offers a form with no mailbox to grant to")
 	}
 	u.addAlice()

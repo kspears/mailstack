@@ -34,6 +34,7 @@ const usage = `mailctl mailbox list|add|passwd|state|remove ...
        mailctl alias list|add|set|remove ...
        mailctl sendas list|add|remove ...
        mailctl domain list|add|remove ...
+       mailctl admin list|add|reset|remove ...
        mailctl log | apply [--publish-empty] | serve | import-mailcow | learn --controller <url> --password-file <path> spam|ham | install-self <directory>`
 
 func run(args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -75,7 +76,7 @@ func (e *env) dispatch(args []string) error {
 	case "apply":
 		return e.apply(rest)
 	}
-	if !slices.Contains([]string{"mailbox", "alias", "sendas", "domain", "log"}, cmd) {
+	if !slices.Contains([]string{"mailbox", "alias", "sendas", "domain", "admin", "log"}, cmd) {
 		return usageError(usage)
 	}
 	cfg, err := generate.ConfigFromEnv(e.getenv)
@@ -96,6 +97,8 @@ func (e *env) dispatch(args []string) error {
 		return e.sendas(admin, rest)
 	case "domain":
 		return e.domain(admin, rest)
+	case "admin":
+		return e.adminAccounts(admin, rest)
 	default:
 		return e.log(admin, rest)
 	}
@@ -325,4 +328,58 @@ func readLine(r *bufio.Reader) (string, error) {
 		return "", errors.New("expected the password twice on stdin, one per line")
 	}
 	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// adminAccounts manages who may sign in to the UI. It is deliberately not in
+// the UI: making or resetting an admin needs a shell on the server.
+func (e *env) adminAccounts(a *generate.Admin, args []string) error {
+	const u = "admin list|add <address>|reset <address>|remove <address>"
+	if len(args) == 0 {
+		return usageError(u)
+	}
+	rest := args[1:]
+	if args[0] == "list" && len(rest) == 0 {
+		admins, err := a.Store().Admins()
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
+		for _, adm := range admins {
+			state := "not enrolled"
+			if adm.Enrolled {
+				state = "enrolled"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%d passkeys\n", adm.Address, state, adm.Passkeys)
+		}
+		return w.Flush()
+	}
+	if len(rest) != 1 || !slices.Contains([]string{"add", "reset", "remove"}, args[0]) {
+		return usageError(u)
+	}
+	site, err := e.site()
+	if err != nil {
+		return err
+	}
+	service, err := site.service(a, nil)
+	if err != nil {
+		return err
+	}
+	address := strings.ToLower(strings.TrimSpace(rest[0]))
+	var token, done string
+	switch args[0] {
+	case "add":
+		token, err = service.AddAdmin(e.actor(), address)
+		done = "added admin " + address
+	case "reset":
+		token, err = service.ResetAdmin(e.actor(), address)
+		done = "reset admin " + address + "; the password, authenticator, passkeys and sessions are gone"
+	default:
+		return e.ok("removed admin "+address, service.RemoveAdmin(e.actor(), address))
+	}
+	if err != nil {
+		return err
+	}
+	// The link is the only copy: the store keeps a hash of it.
+	fmt.Fprintf(e.stdout, "ok: %s\nEnrolment link, valid for 24 hours and shown only now. Send it by a channel you trust:\n%s/enrol?t=%s\n", done, site.origin(), token)
+	return nil
 }

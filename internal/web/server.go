@@ -4,7 +4,7 @@ package web
 
 import (
 	"bytes"
-	"cmp"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -15,12 +15,12 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
-	"net/url"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/kspears/mailstack/internal/access"
+	"github.com/kspears/mailstack/internal/auth"
 	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/store"
 	"github.com/kspears/mailstack/internal/validate"
@@ -36,19 +36,34 @@ const (
 	maxBody     = 64 << 10
 	flashCookie = "flash"
 	csp         = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	// Only the pages that offer a passkey carry a script, and only from here.
+	cspScript = csp + "; script-src 'self'; connect-src 'self'"
+	// Only the pages that show an authenticator QR code carry an image.
+	cspImage = cspScript + "; img-src 'self'"
 )
 
 // Config wires the server. Logf receives one line per request plus the reason
-// for each refused identity; it never receives query strings, bodies or tokens.
+// for each refusal; it never receives query strings, bodies or tokens.
 type Config struct {
-	Admin      *generate.Admin
-	Identifier access.Identifier
-	Logf       func(format string, args ...any)
+	Admin *generate.Admin
+	Auth  *auth.Service
+	// AdminHost is the only Host the UI answers to. RspamdHost, if set, is the
+	// hostname whose requests the proxy checks against /_mailstack/check.
+	AdminHost  string
+	RspamdHost string
+	// Insecure is for local development over plain HTTP: cookies lose the
+	// Secure flag and the __Host- prefix, and links use http.
+	Insecure bool
+	// TrustedProxy is the one address whose ClientAddrHeader is believed.
+	TrustedProxy     netip.Addr
+	ClientAddrHeader string
+	Logf             func(format string, args ...any)
 }
 
 type server struct {
+	cfg       Config
 	admin     *generate.Admin
-	id        access.Identifier
+	auth      *auth.Service
 	logf      func(string, ...any)
 	csrfKey   []byte
 	templates *template.Template
@@ -56,9 +71,13 @@ type server struct {
 
 type ctxKey struct{}
 
-// New returns the handler for the whole UI. Every request is identified first.
+// New returns the handler for the whole UI. Every request passes through guard.
 func New(cfg Config) (http.Handler, error) {
-	s := &server{admin: cfg.Admin, id: cfg.Identifier, logf: cfg.Logf, csrfKey: make([]byte, 32)}
+	cfg.AdminHost, cfg.RspamdHost = strings.ToLower(cfg.AdminHost), strings.ToLower(cfg.RspamdHost)
+	if cfg.AdminHost == "" {
+		return nil, fmt.Errorf("the admin UI needs the hostname it is served on")
+	}
+	s := &server{cfg: cfg, admin: cfg.Admin, auth: cfg.Auth, logf: cfg.Logf, csrfKey: make([]byte, 32)}
 	if _, err := rand.Read(s.csrfKey); err != nil {
 		return nil, fmt.Errorf("generate CSRF key: %w", err)
 	}
@@ -95,6 +114,7 @@ func New(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("POST /sendas/add", s.sendAsAdd)
 	mux.HandleFunc("POST /sendas/remove", s.sendAsRemove)
 	mux.HandleFunc("GET /log", s.changeLog)
+	s.authRoutes(mux)
 	return s.guard(mux), nil
 }
 
@@ -113,51 +133,62 @@ func (s *server) guard(next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		h := sw.Header()
-		h.Set("Content-Security-Policy", csp)
+		h.Set("Content-Security-Policy", cspFor(r.URL.Path))
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cache-Control", "no-store")
 
-		actor, err := s.id.Identify(r)
-		if err != nil {
-			s.logf("denied %s %s: %v", r.Method, r.URL.Path, err)
+		actor := "-"
+		sess, signedIn := s.auth.Session(s.cookie(r, sessionCookie), store.AdminSession)
+		if signedIn {
+			actor = sess.Admin
+		}
+		r.Body = http.MaxBytesReader(sw, r.Body, maxBody)
+		switch {
+		case !s.hostAllowed(r):
+			s.logf("refused %s %s: host %q is not served here", r.Method, r.URL.Path, r.Host)
+			http.Error(sw, "misdirected request", http.StatusMisdirectedRequest)
+		case signedIn:
+			next.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), ctxKey{}, sess)))
+		case public(r.URL.Path):
+			next.ServeHTTP(sw, r)
+		case r.Method == http.MethodGet:
+			http.Redirect(sw, r, "/signin", http.StatusSeeOther)
+		default:
 			http.Error(sw, "forbidden", http.StatusForbidden)
-			actor = "-"
-		} else {
-			r.Body = http.MaxBytesReader(sw, r.Body, maxBody)
-			next.ServeHTTP(sw, r.WithContext(contextWithActor(r, actor)))
 		}
 		s.logf("%s %s %d %s %s", r.Method, r.URL.Path, sw.status, actor, time.Since(start).Round(time.Millisecond))
 	})
 }
 
-func (s *server) token(actor string) string {
+// token is the CSRF token for key: the session for a signed-in admin, the
+// pre-session cookie for the sign-in and enrolment forms.
+func (s *server) token(key string) string {
 	m := hmac.New(sha256.New, s.csrfKey)
-	m.Write([]byte(actor))
+	m.Write([]byte(key))
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// checkPost enforces same-origin and the per-identity token, then parses the form.
+// sameOrigin reports whether the browser says the request was made by one of
+// this origin's own pages. Sec-Fetch-Site is set by the browser and cannot be
+// forged by a page. Sibling hostnames under one domain count as "same-site",
+// not "same-origin", so nothing served from them passes.
+func sameOrigin(r *http.Request) error {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "same-origin" {
+		return fmt.Errorf("Sec-Fetch-Site is %q, not same-origin", site)
+	}
+	return nil
+}
+
+// checkPost enforces same-origin and the CSRF token, then parses the form.
 func (s *server) checkPost(r *http.Request) error {
-	// Sec-Fetch-Site is set by the browser and cannot be forged by a page, so
-	// "same-origin" settles it. Origin and Referer are the fallback for a browser
-	// that sends no fetch metadata; they are not required alongside it, because a
-	// browser under a strict referrer policy sends "Origin: null" on its own forms.
-	switch site := r.Header.Get("Sec-Fetch-Site"); site {
-	case "same-origin":
-	case "", "none":
-		source := cmp.Or(r.Header.Get("Origin"), r.Header.Get("Referer"))
-		u, err := url.Parse(source)
-		if source == "" || err != nil || u.Host != r.Host {
-			return fmt.Errorf("origin does not match host %q", r.Host)
-		}
-	default:
-		return fmt.Errorf("Sec-Fetch-Site is %q", site)
+	if err := sameOrigin(r); err != nil {
+		return err
 	}
 	if err := r.ParseForm(); err != nil {
 		return fmt.Errorf("read form: %w", err)
 	}
-	if !hmac.Equal([]byte(r.PostFormValue("csrf")), []byte(s.token(actorOf(r)))) {
+	if !hmac.Equal([]byte(r.PostFormValue("csrf")), []byte(s.token(s.csrfKeyOf(r)))) {
 		return fmt.Errorf("bad or missing CSRF token")
 	}
 	return nil
@@ -192,28 +223,38 @@ func (s *server) finish(w http.ResponseWriter, r *http.Request, back string, op 
 }
 
 func (s *server) flash(w http.ResponseWriter, r *http.Request, back, line string) {
-	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: base64.RawURLEncoding.EncodeToString([]byte(line)), Path: "/", MaxAge: 60, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	s.setCookie(w, flashCookie, base64.RawURLEncoding.EncodeToString([]byte(line)), 60, http.SameSiteStrictMode)
 	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
 type page struct {
-	Title string
-	Nav   string
-	CSRF  string
-	Flash string
-	IsErr bool
-	Actor string
-	Data  any
+	Title  string
+	Nav    string
+	CSRF   string
+	Flash  string
+	IsErr  bool
+	Actor  string
+	Rspamd string // link to the spam filter's own UI, if it is published
+	Script bool   // this page offers a passkey
+	Data   any
 }
 
 func (s *server) render(w http.ResponseWriter, r *http.Request, name, nav, title string, data any) {
-	p := page{Title: title, Nav: nav, CSRF: s.token(actorOf(r)), Actor: actorOf(r), Data: data}
-	if c, err := r.Cookie(flashCookie); err == nil {
-		if b, err := base64.RawURLEncoding.DecodeString(c.Value); err == nil {
+	s.renderPage(w, r, name, page{Title: title, Nav: nav, Data: data})
+}
+
+func (s *server) renderPage(w http.ResponseWriter, r *http.Request, name string, p page) {
+	p.CSRF, p.Actor = s.token(s.csrfKeyOf(r)), actorOf(r)
+	p.Script = strings.Contains(w.Header().Get("Content-Security-Policy"), "script-src")
+	if p.Actor != "" && s.cfg.RspamdHost != "" {
+		p.Rspamd = s.origin(s.cfg.RspamdHost) + "/"
+	}
+	if v := s.cookie(r, flashCookie); v != "" && p.Flash == "" {
+		if b, err := base64.RawURLEncoding.DecodeString(v); err == nil {
 			p.Flash = string(b)
 			p.IsErr = strings.HasPrefix(p.Flash, "error:")
 		}
-		http.SetCookie(w, &http.Cookie{Name: flashCookie, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		s.setCookie(w, flashCookie, "", -1, http.SameSiteStrictMode)
 	}
 	var buf bytes.Buffer
 	if err := s.templates.ExecuteTemplate(&buf, name, p); err != nil {
@@ -317,6 +358,9 @@ func (s *server) withPassword(w http.ResponseWriter, r *http.Request, op func(ac
 	}
 	s.render(w, r, "password_once", "mailboxes", "New password", struct{ Summary, Password string }{summary, pw})
 }
+
+// rand32 returns 160 random bits as text, for cookies that are not sessions.
+func rand32() string { return rand.Text() + rand.Text()[:6] }
 
 // newPassword returns 100 random bits as four groups of five base32 characters.
 func newPassword() string {
