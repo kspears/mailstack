@@ -108,6 +108,10 @@ func (a *Admin) Snapshot() (store.Snapshot, error) { return a.st.Snapshot() }
 
 func (a *Admin) Log() ([]store.LogEntry, error) { return a.st.Log() }
 
+// Store is for the sign-in tables only, which no generated file depends on.
+// Every account change goes through the methods of Admin instead.
+func (a *Admin) Store() *store.Store { return a.st }
+
 // MailPath is where a mailbox's mail lives on disk.
 func (a *Admin) MailPath(address string) string {
 	local, domain := validate.Split(address)

@@ -141,7 +141,10 @@ func Create(path string) (*Store, error) {
 
 func open(path string) (*Store, error) {
 	q := url.Values{}
-	q.Add("_pragma", "busy_timeout(10000)")
+	// An account change holds the write lock while it waits for postfix to accept
+	// the new files, 30 seconds by default. A sign-in arriving meanwhile has to
+	// write too (a spent code, a session), and must wait that out, not fail.
+	q.Add("_pragma", "busy_timeout(45000)")
 	q.Add("_pragma", "foreign_keys(1)")
 	db, err := sql.Open("sqlite", "file:"+url.PathEscape(path)+"?"+q.Encode())
 	if err != nil {
@@ -294,8 +297,8 @@ func snapshot(q querier) (Snapshot, error) {
 	return snap, err
 }
 
-func scan(q querier, query string, each func(*sql.Rows) error) error {
-	rows, err := q.Query(query)
+func scan(q querier, query string, each func(*sql.Rows) error, args ...any) error {
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return err
 	}

@@ -1,0 +1,44 @@
+{{define "account"}}{{template "head" .}}
+{{with .Data}}
+{{if not .Fresh}}
+<h2>Confirm it is you</h2>
+<p class="muted">Changing how you sign in needs a fresh confirmation, good for 5 minutes.</p>
+<div class="card">
+<button type="button" data-passkey="get" data-begin="/account/prove/passkey/begin" data-finish="/account/prove/passkey/finish" data-next="/account" data-csrf="{{$.CSRF}}">Confirm with a passkey</button>
+<p id="passkey-status" class="muted" role="status"></p>
+</div>
+<form class="card" method="post" action="/account/prove">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="pr-pw">Password</label>
+<input id="pr-pw" name="password" type="password" autocomplete="current-password" required>
+<label for="pr-code">Code from your authenticator app</label>
+<input id="pr-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required>
+<button type="submit">Confirm</button>
+</form>
+{{end}}
+<h2>Passkeys</h2>
+{{if .Passkeys}}<div class="scroll"><table>
+<thead><tr><th>Name</th><th>Added</th><th></th></tr></thead>
+<tbody>{{range .Passkeys}}<tr><td>{{.Label}}</td><td>{{.Created}}</td><td>{{if $.Data.Fresh}}<form method="post" action="/account/passkeys/remove"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="plain danger" type="submit">Remove</button></form>{{end}}</td></tr>
+{{end}}</tbody></table></div>{{else}}<p class="muted">None yet. A passkey signs you in with your fingerprint, face or device PIN, with no password or code.</p>{{end}}
+{{if .Fresh}}
+<div class="card">
+<label for="pk-label">Name for this passkey, such as the device it lives on</label>
+<input id="pk-label" maxlength="40">
+<button type="button" data-passkey="create" data-label="pk-label" data-begin="/account/passkeys/begin" data-finish="/account/passkeys/finish" data-next="/account" data-csrf="{{$.CSRF}}">Add a passkey</button>
+<p id="passkey-status" class="muted" role="status"></p>
+</div>
+<h2>Password</h2>
+<form class="card" method="post" action="/account/password">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="ac-pw">New password (at least 12 characters)</label>
+<input id="ac-pw" name="password" type="password" autocomplete="new-password" minlength="12" required>
+<label for="ac-pw2">New password again</label>
+<input id="ac-pw2" name="password2" type="password" autocomplete="new-password" minlength="12" required>
+<button type="submit">Change password</button>
+</form>
+<h2>Authenticator app</h2>
+<form method="post" action="/account/authenticator/new"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="plain" type="submit">Replace authenticator...</button></form>
+{{end}}
+{{end}}
+{{template "foot" .}}{{end}}

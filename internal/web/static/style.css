@@ -40,3 +40,9 @@ th { color: var(--muted); font-weight: 600; }
 td:first-child { color: var(--muted); font-variant-numeric: tabular-nums; }
 td:last-child { width: 100%; }
 @media (min-width: 48rem) { td:last-child { white-space: normal; overflow-wrap: break-word; } }
+
+/* Sign-in pages */
+header nav form { display: flex; margin-left: auto; }
+header nav form button { min-height: 44px; }
+img.qr { display: block; background: #fff; padding: .5rem; border-radius: .5rem; image-rendering: pixelated; }
+code { overflow-wrap: anywhere; }
