@@ -231,11 +231,14 @@ strings on `/_mailstack/finish`.
 
 ### Running it locally
 
-`just dev` serves on `http://localhost:8080` against `MAILCTL_STATE`. Make yourself an
-admin first, with the same settings, and open the link it prints:
+`just dev` serves on `http://localhost:8080` and keeps its state in `.dev/` (or wherever
+`MAILCTL_STATE` points). `just dev-ctl` runs any `mailctl` command against that same state.
+Make yourself an admin first and open the link it prints:
 
 ```
-MAILCTL_DEV=1 MAILCTL_ADMIN_HOST=localhost:8080 go run ./cmd/mailctl admin add you@example.test
+just dev-ctl admin add you@example.test
+just dev-ctl domain add example.test
+just dev
 ```
 
 ## Importing from mailcow

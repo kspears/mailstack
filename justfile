@@ -8,9 +8,18 @@ default:
 setup:
     go mod download
 
-# Run the admin UI on http://localhost:8080; make an admin first (README, "Running it locally")
+# Local development keeps its state in .dev/ unless MAILCTL_STATE says otherwise.
+dev_env := "MAILCTL_DEV=1 MAILCTL_ADMIN_HOST=localhost:8080 MAILCTL_LISTEN=127.0.0.1:8080 MAILCTL_WATCHER=off" + \
+    " MAILCTL_STATE=" + env("MAILCTL_STATE", justfile_directory() / ".dev/state") + \
+    " MAILCTL_MAIL_ROOT=" + env("MAILCTL_MAIL_ROOT", justfile_directory() / ".dev/mail")
+
+# Run the admin UI on http://localhost:8080; make an admin first with `just dev-ctl admin add <address>`
 dev *args:
-    MAILCTL_DEV=1 MAILCTL_ADMIN_HOST=localhost:8080 MAILCTL_LISTEN=127.0.0.1:8080 go run ./cmd/mailctl serve "$@"
+    {{dev_env}} go run ./cmd/mailctl serve "$@"
+
+# Run any mailctl command against the same local state as `just dev`
+dev-ctl *args:
+    {{dev_env}} go run ./cmd/mailctl "$@"
 
 # Full CI gate: formatting, vet, tests, build
 check: lint test build
