@@ -32,12 +32,18 @@ func TestCountSieveScripts(t *testing.T) {
 	if n, _ := countSieveScripts(root); n != 0 {
 		t.Errorf("an empty sieve directory counted: %d", n)
 	}
+	// What mailcow leaves in a mailbox that once used ManageSieve, and a compiled script.
+	put(t, filepath.Join(root, "example.test", "alice", "sieve", "tmp", "upload"), "x")
+	put(t, filepath.Join(root, "example.test", "alice", "sieve", "old.svbin"), "x")
+	if n, _ := countSieveScripts(root); n != 0 {
+		t.Errorf("tmp/ and a compiled script counted: %d", n)
+	}
 	put(t, filepath.Join(root, "sieve", "extra.sieve"), "x")
 	put(t, filepath.Join(root, "example.test", "alice", "sieve", "mine.sieve"), "x")
 	put(t, filepath.Join(root, "example.test", "bob", "active.sieve"), "x")
 	put(t, filepath.Join(root, "example.test", "bob", "Maildir", "note.txt"), "x")
 	if n, err := countSieveScripts(root); err != nil || n != 3 {
-		t.Errorf("count = %d, %v; want a stray global, a non-empty sieve directory and a home script", n, err)
+		t.Errorf("count = %d, %v; want a stray global, a script in a sieve directory and a home script", n, err)
 	}
 	if _, err := countSieveScripts(filepath.Join(root, "missing")); err == nil {
 		t.Error("a missing mail root was not an error")

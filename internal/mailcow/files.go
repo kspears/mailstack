@@ -58,7 +58,8 @@ func mailboxHomes(root string) ([]string, error) {
 
 // countSieveScripts counts user Sieve scripts under a mail root: files matching
 // <root>/sieve/*.sieve except mailcow's two global scripts, plus, in each mailbox
-// home, every *.sieve file and a non-empty sieve/ directory.
+// home, every *.sieve file directly in it or in its sieve/ directory. Other entries
+// of sieve/ (compiled .svbin files, ManageSieve's tmp/) are not scripts.
 func countSieveScripts(root string) (int, error) {
 	homes, err := mailboxHomes(root)
 	if err != nil {
@@ -87,8 +88,10 @@ func countSieveScripts(root string) (int, error) {
 				if err != nil {
 					return 0, err
 				}
-				if len(inner) > 0 {
-					n++
+				for _, f := range inner {
+					if !f.IsDir() && strings.HasSuffix(f.Name(), ".sieve") {
+						n++
+					}
 				}
 			case !e.IsDir() && strings.HasSuffix(e.Name(), ".sieve"):
 				n++
