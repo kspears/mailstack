@@ -8,6 +8,7 @@ not something to let a bot bump. Nothing here follows a floating tag.
 | Component | Pin | File |
 |---|---|---|
 | postfix (via Debian) | `debian:trixie-slim` tag and digest | `images/postfix/Dockerfile` |
+| unbound (via Debian) | `debian:trixie-slim` tag and digest | `images/unbound/Dockerfile` |
 | mailctl build | `golang:<version>-trixie` tag and digest | `images/admin/Dockerfile` |
 | mailctl runtime | `gcr.io/distroless/static-debian13` digest (no version tags exist) | `images/admin/Dockerfile` |
 | dovecot | `dovecot/dovecot:<version>-root` tag and digest | `deploy/ci/compose.yaml` and the deployment's compose file |
@@ -15,7 +16,7 @@ not something to let a bot bump. Nothing here follows a floating tag.
 | redis | `redis:<version>-alpine` tag and digest | same |
 | test client | `python:<version>-slim` tag and digest | `deploy/ci/compose.yaml` |
 
-The postfix package itself is whatever Debian ships on the pinned base image's suite at
+The postfix and unbound packages are whatever Debian ships on the pinned base image's suite at
 build time, so rebuilding the same digest on another day can pull a newer point release.
 Release images are built once, tagged, and deployed by tag; do not rebuild to "refresh".
 
@@ -40,6 +41,8 @@ Never move two pins in one change; when the test fails you need to know which on
    not just the last one.
    - Debian and postfix: <https://www.postfix.org/announcements.html> and the Debian
      package changelog linked from <https://tracker.debian.org/pkg/postfix>.
+   - unbound: <https://nlnetlabs.nl/projects/unbound/download/> and
+     <https://tracker.debian.org/pkg/unbound>.
    - dovecot: <https://github.com/dovecot/core/releases> and
      <https://doc.dovecot.org/> (the "Upgrading" and "Settings changes" pages for the 2.4 series).
    - rspamd: <https://github.com/rspamd/rspamd/blob/master/ChangeLog> and

@@ -19,6 +19,7 @@ internal/web/       server-rendered admin UI
 internal/auth/      the UI's own sign-in: passwords with an authenticator code, passkeys, sessions
 images/postfix/     postfix image: Debian, the distro package, a reload watcher
 images/admin/       image for mailctl
+images/unbound/     recursive resolver for postscreen and rspamd: Debian, the distro package
 deploy/ci/          compose file used by the integration test
 docs/UPGRADING.md   how to move an image pin
 ```
