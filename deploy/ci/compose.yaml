@@ -69,7 +69,7 @@ services:
       redis:
         condition: service_healthy
       unbound:
-        condition: service_started
+        condition: service_healthy
     dns: [10.254.76.53]
     volumes:
       - ./rspamd/local.d:/etc/rspamd/local.d:ro
@@ -116,7 +116,7 @@ services:
       rspamd:
         condition: service_started
       unbound:
-        condition: service_started
+        condition: service_healthy
     dns: [10.254.76.53]
     volumes:
       - ./postfix/main.cf:/etc/postfix/main.cf:ro

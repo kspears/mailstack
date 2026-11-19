@@ -20,6 +20,12 @@ The postfix and unbound packages are whatever Debian ships on the pinned base im
 build time, so rebuilding the same digest on another day can pull a newer point release.
 Release images are built once, tagged, and deployed by tag; do not rebuild to "refresh".
 
+The two Debian-based images pin the same `debian:trixie-slim` digest and move together:
+that is one change, the exception to "one pin at a time" below. unbound's DNSSEC root trust
+anchor comes from Debian's `dns-root-data` and is fixed when the image is built, so a root
+key rollover reaches the stack only through a new image; when IANA announces one, cut a
+release before the old key is retired.
+
 Every pin is written `image:tag@sha256:...`. The tag says what was meant; the digest is what
 runs. When they disagree, the digest wins.
 
