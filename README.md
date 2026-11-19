@@ -281,7 +281,7 @@ items live in files, so they are counted from disk:
 
 | Item | Counted from |
 |---|---|
-| `sieve-scripts` | `<root>/sieve/*.sieve` except `global_sieve_before.sieve` and `global_sieve_after.sieve`, plus every `*.sieve` file and every non-empty `sieve/` directory directly inside a mailbox home `<root>/<domain>/<user>/` (kept apart from `sieve-filters`, which counts mailcow's database rows) |
+| `sieve-scripts` | `<root>/sieve/*.sieve` except `global_sieve_before.sieve` and `global_sieve_after.sieve`, plus every `*.sieve` file directly inside a mailbox home `<root>/<domain>/<user>/` or its `sieve/` directory (kept apart from `sieve-filters`, which counts mailcow's database rows) |
 | `shared-folder-acls` | non-empty `dovecot-acl` files in any mailbox's `Maildir` and its folder directories (never inside `cur`, `new` or `tmp`), plus a non-empty `<root>/shared-mailboxes.db` |
 | `global-rspamd-maps` | non-blank, non-`#` lines in the `*.map` files of `MAILCOW_RSPAMD_CUSTOM_DIR` |
 
