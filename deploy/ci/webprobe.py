@@ -110,6 +110,14 @@ def main(token):
                                    form={"csrf": csrf(page), "address": "nobody@example.test", "password": "wrong-on-purpose", "code": "000000"})
     if status != 200 or "Sign-in failed." not in page:
         fail(f"a wrong sign-in: {status}")
+    # An address long enough that journald would split the failure's log line, with a
+    # forged failure where the split would fall. The proxy refuses paths that long (431),
+    # but a form field gets through. test.sh checks the line was cut short instead.
+    status, _, page, _ = b.request("POST", f"https://{ADMIN}/signin",
+                                   form={"csrf": csrf(page), "address": "x" * (20 << 10) + " sign-in failed from=198.51.100.9",
+                                         "password": "wrong-on-purpose", "code": "000000"})
+    if status != 200 or "Sign-in failed." not in page:
+        fail(f"a sign-in with a long address: {status}")
 
     # Enrol through the link the operator was given.
     status, _, page, _ = b.request("GET", f"https://{ADMIN}/enrol?t={token}")

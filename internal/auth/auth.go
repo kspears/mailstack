@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/crypto/bcrypt"
@@ -46,11 +47,26 @@ const (
 	// Every refused sign-in takes at least this long, measured from its start,
 	// so the time taken does not say which check refused it.
 	failureFloor = 750 * time.Millisecond
+	// Password comparisons run in this many slots at once, and a sign-in waits
+	// at most checkWait for one. bcrypt is the costly step anyone may trigger
+	// without an account; unbounded, a flood of sign-ins takes every CPU the
+	// mail server has.
+	checkSlots = 2
+	checkWait  = 2 * time.Second
+	// The longest line Logf writes, in bytes. Docker's journald driver splits a
+	// line over 16 KiB into separate entries, and the second would start with
+	// text the visitor chose, so a ban rule anchored on the start of an entry
+	// could be made to match it.
+	maxLogLine = 1024
 )
 
 // ErrSignIn is the one failure a caller may show. Why it failed is logged by
 // Service and never returned.
 var ErrSignIn = errors.New("Sign-in failed.")
+
+// ErrBusy is returned instead of checking a password while too many other
+// checks are running. It says nothing about the account.
+var ErrBusy = Problem("Too many sign-ins at once. Try again in a moment.")
 
 // A Problem is a mistake the person can correct, worded for them. Any other
 // error from this package is a fault and must not be shown.
@@ -85,6 +101,10 @@ type Service struct {
 	// requests cannot each see nine failures and all be allowed a tenth.
 	codes sync.Mutex
 
+	// checking holds one token per password comparison in progress.
+	checking  chan struct{}
+	checkWait time.Duration
+
 	mu         sync.Mutex
 	ceremonies map[string]ceremony
 	pending    map[string]pendingSecret
@@ -118,7 +138,8 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{st: st, cfg: cfg, wa: wa, fake: fake, ceremonies: map[string]ceremony{}, pending: map[string]pendingSecret{}}, nil
+	return &Service{st: st, cfg: cfg, wa: wa, fake: fake, checking: make(chan struct{}, checkSlots), checkWait: checkWait,
+		ceremonies: map[string]ceremony{}, pending: map[string]pendingSecret{}}, nil
 }
 
 // newToken returns 256 random bits for a cookie or a link, and the hash that
@@ -130,18 +151,27 @@ func newToken() (token string, hash []byte) {
 	return token, Hash(token)
 }
 
-// SingleLine wraps logf so that one call writes exactly one line, whatever
-// the arguments hold. Bans are made from this log, and several things in it
-// (a path, an address, a library's error text) are chosen by the visitor: none
-// of them may start a line of its own.
+// SingleLine wraps logf so that one call writes exactly one line of at most
+// maxLogLine bytes, whatever the arguments hold. Bans are made from this log,
+// and several things in it (a path, an address, a library's error text) are
+// chosen by the visitor: none of them may start a line of its own.
 func SingleLine(logf func(format string, args ...any)) func(format string, args ...any) {
+	const cut = " [truncated]"
 	return func(format string, args ...any) {
-		logf("%s", strings.Map(func(r rune) rune {
+		line := strings.Map(func(r rune) rune {
 			if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 				return ' '
 			}
 			return r
-		}, fmt.Sprintf(format, args...)))
+		}, fmt.Sprintf(format, args...))
+		if len(line) > maxLogLine {
+			n := maxLogLine - len(cut)
+			for n > 0 && !utf8.RuneStart(line[n]) {
+				n--
+			}
+			line = line[:n] + cut
+		}
+		logf("%s", line)
 	}
 }
 
@@ -385,7 +415,12 @@ func (s *Service) passwordAndCode(from, what, address, password, code string) (s
 	if len(password) > 72 {
 		password, hash = "", s.fake
 	}
+	if !s.acquire() {
+		s.cfg.Logf("%s busy from=%s", what, from)
+		return "", ErrBusy
+	}
 	passwordOK := bcrypt.CompareHashAndPassword(hash, []byte(password)) == nil
+	<-s.checking
 	if !usable || !passwordOK {
 		return refuse("wrong address or password")
 	}
@@ -413,6 +448,20 @@ func (s *Service) passwordAndCode(from, what, address, password, code string) (s
 		return refuse("wrong or reused code")
 	}
 	return admin.Address, nil
+}
+
+// acquire takes a slot to compare a password in, waiting up to checkWait for
+// one. The caller frees it as soon as the comparison is done, before any
+// failure delay, so slow refusals cannot hold every slot.
+func (s *Service) acquire() bool {
+	t := time.NewTimer(s.checkWait)
+	defer t.Stop()
+	select {
+	case s.checking <- struct{}{}:
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 func (s *Service) newSession(address string) (string, error) {
