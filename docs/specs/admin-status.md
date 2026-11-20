@@ -257,8 +257,11 @@ when their `Stat` device ids match. The code must build on both linux (productio
   - The integration test (`deploy/ci/test.sh`) checks:
     - `watcher/heartbeat` is updated while postfix runs;
     - `/status` returns 200 for a signed-in admin;
-    - after the existing "spam goes to Junk" step, the Mailboxes page shows a `Last delivery` line
-      for `alice@example.test`. This proves the real Junk folder path.
+    - after the existing "spam goes to Junk" step, the Junk folder's `new` or `cur` directory for
+      `alice@example.test` holds a file, checked directly with `ls` in the dovecot container. This
+      proves the real Junk folder path; alice's Mailboxes row alone does not, since she also gets
+      Inbox mail;
+    - the Mailboxes page shows a `Last delivery` line for `alice@example.test`.
 - `just check` passes.
 
 ## Acceptance criteria
@@ -328,6 +331,9 @@ criterion 16 by a person.
 | Mailboxes scanned | Store mailboxes only | Leftover mail of removed mailboxes is not a delivery | Agent default |
 | Scan cache | 60 seconds, shared, one scan at a time, new mailboxes scanned alone | Fresh enough for a phone call, without a scan on every reload | Agent default |
 | Disk percent | `df`-style, thresholds on the unrounded value, displayed rounded down; one card when both paths share a filesystem | Matches what `df` shows; avoids two identical cards | Agent default |
+| Boundaries | Heartbeat red when older than 5 min (exactly 5 min is green); pending yellow when older than the timeout (exactly the timeout is neutral); last mail yellow at 2 h or older; disk yellow at 80.0% or more, red at 90.0% or more | Pins every edge so tests and code agree | Agent default |
+| Missing mail root | When `MAILCTL_MAIL_ROOT` does not exist yet, the disk check reads the nearest existing parent directory | mailctl never creates it, so a fresh install or `just dev` would otherwise show a red disk | Agent default |
+| Log page header | `Time (UTC)` becomes `Time` | Times are now Pacific | Agent default |
 | Size | `st_blocks × 512`, binary units, one decimal | Size on disk is what fills the disk | Agent default |
 | Time zone | Pacific (`America/Los_Angeles`) on every UI page, Log included; fixed in code | The admins and family are in Pacific time | User (zone); agent default (all pages, no setting) |
 | Ages | Rounded down: `s`, `min`, `h`, `days` | | Agent default |
