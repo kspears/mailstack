@@ -289,7 +289,7 @@ func TestAliasLifecycle(t *testing.T) {
 	if a := u.snapshot().Aliases; len(a) != 1 || a[0].Address != "info@example.test" {
 		t.Fatalf("aliases = %+v", a)
 	}
-	if !strings.Contains(r.body, "delivers to alice@example.test") {
+	if !strings.Contains(r.body, `info@example.test</a></td><td class="wrap">alice@example.test, bob@example.test</td>`) {
 		t.Errorf("alias list lacks targets:\n%s", r.body)
 	}
 	if e := u.get("/aliases/edit?address=info@example.test"); !strings.Contains(e.body, `value="alice@example.test, bob@example.test"`) {

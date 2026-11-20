@@ -9,7 +9,9 @@
 <button type="submit">Add alias</button>
 </form>
 </details>
-{{if .Data}}<div class="grid">
-{{range .Data}}<a class="card row" href="/aliases/edit?address={{.Address}}"><b>{{.Address}}</b><small>delivers to {{join .Targets ", "}}</small></a>
-{{end}}</div>{{else}}<p>No aliases.</p>{{end}}
+{{if .Data}}<div class="scroll"><table class="list">
+<thead><tr><th>Alias</th><th>Delivers to</th></tr></thead>
+<tbody>{{range .Data}}<tr><td><a href="/aliases/edit?address={{.Address}}">{{.Address}}</a></td><td class="wrap">{{join .Targets ", "}}</td></tr>
+{{end}}</tbody>
+</table></div>{{else}}<p>No aliases.</p>{{end}}
 {{template "foot" .}}{{end}}

@@ -49,6 +49,7 @@ table.list td { color: inherit; }
 table.list td:last-child { width: auto; }
 table.list td a { color: inherit; font-weight: 600; }
 table.list td.bad { color: var(--danger); }
+table.list td.wrap { width: 100%; white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 47.99rem) {
   table.list thead { display: none; }
   table.list tr { display: block; padding: .6rem 0; border-bottom: 1px solid var(--line); }
