@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/kspears/mailstack/internal/generate"
@@ -67,12 +68,10 @@ type check struct {
 
 // Evaluate turns the gathered inputs into the cards, verdict and reasons.
 func Evaluate(in Inputs) Report {
-	verdict := cmp.Or(in.Watcher.Status, "No verdict yet")
 	checks := []check{
 		watcherCheck(in),
 		filesCheck(in),
 		pendingCheck(in),
-		{Card: Card{"Last watcher verdict", Neutral, verdict}},
 		mailCheck(in),
 	}
 	checks = append(checks, diskChecks(in)...)
@@ -120,7 +119,29 @@ func watcherCheck(in Inputs) check {
 	return check{Card: Card{title, Green, "Last seen " + Age(age) + " ago"}}
 }
 
+// filesCheck also carries the watcher's last verdict when it rejected a change. That
+// is history, since mailctl rolled the change back and reported it then, so it adds a
+// line without changing the mark.
 func filesCheck(in Inputs) check {
+	c := filesState(in)
+	if msg := rejected(in.Watcher.Status, in.Files.Current); msg != "" {
+		c.Value += "\nLast change was rejected: " + msg
+	}
+	return c
+}
+
+// rejected returns the watcher's message when its last verdict was an error about a
+// generation other than the one in use.
+func rejected(status, current string) string {
+	id, rest, _ := strings.Cut(status, " ")
+	msg, isErr := strings.CutPrefix(rest, "error")
+	if !isErr || id == current {
+		return ""
+	}
+	return cmp.Or(strings.TrimSpace(msg), "no reason given")
+}
+
+func filesState(in Inputs) check {
 	const title = "Account files"
 	switch in.Files.State {
 	case generate.FilesError:

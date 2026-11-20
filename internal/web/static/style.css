@@ -71,6 +71,7 @@ details.add[open] summary { margin-bottom: .25rem; }
 .verdict.yellow, .check.yellow { background: var(--warn-bg); color: var(--warn-fg); }
 .verdict.red, .check.red { background: var(--err-bg); color: var(--err-fg); }
 .check small, .check span { display: block; }
+.check span { white-space: pre-line; }
 .check small { opacity: .8; }
 .note { font-size: .9rem; }
 .row small.bad { color: var(--danger); }

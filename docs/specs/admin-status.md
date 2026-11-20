@@ -64,10 +64,8 @@ state, so nothing new goes in the change log.
 4. Below that is one card per check, in this order. Each card has a mark: green, yellow, red, or
    neutral (no colour, information only). Each card shows a one-line value:
    - **Postfix watcher**: `Last seen 12 s ago`.
-   - **Account files**: `In use: <generation id>`, plus `Matches the account store`.
+   - **Account files**: `In use: <generation id>`, plus `Matches the account store`. When `watcher/status` reports an error for a generation other than the one in use, a second line reads `Last change was rejected: <message>`.
    - **Pending change**: `None`, or `<generation id>, waiting <age>`.
-   - **Last watcher verdict**: the contents of `watcher/status`, for example
-     `20261117T120000.000000Z-1a2b3c4d ok`.
    - **Last mail in**: `<time> (<age> ago)`, the newest delivery across all mailboxes.
    - **Disk**: one card per distinct filesystem. If `MAILCTL_MAIL_ROOT` and `MAILCTL_STATE` are
      on the same filesystem, there is one card titled `Mail and state disk`. Otherwise there are
@@ -110,15 +108,16 @@ ids, watcher error lines with paths) wraps rather than widening the page.
 | Postfix watcher | mtime of `<state>/watcher/heartbeat` | updated within the last 5 minutes | `MAILCTL_WATCHER=off`: `Watcher is off` | file missing: `Postfix watcher has not reported yet` | older than 5 minutes: `Postfix watcher last seen <age> ago` |
 | Account files | `generations/current` compared with what the store renders (below) | match | `current` missing: `No account files yet`. Change lock busy: `A change is being applied` | | no match, or `current` unreadable: `The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"` |
 | Pending change | `generations/pending` symlink; age is the `Lstat` mtime of the link | absent: `None` | present and not older than `MAILCTL_APPLY_TIMEOUT`: `<generation id>, waiting <age>`. `MAILCTL_WATCHER=off`: `Watcher is off` | present and older than `MAILCTL_APPLY_TIMEOUT`: card `<generation id>, waiting <age>`, reason `A change has been pending for <age>` | |
-| Last watcher verdict | `<state>/watcher/status` | | always. Missing file: `No verdict yet` | | |
 | Last mail in | newest last delivery across all mailboxes (below) | newest delivery within the last 2 hours | no delivery in any mailbox: `No mail yet` | newest delivery 2 hours ago or older: `No mail received for <age>`. One or more mailboxes could not be read: `<n> mailboxes could not be read` | |
 | Disk | `syscall.Statfs` on `MAILCTL_MAIL_ROOT` and on `MAILCTL_STATE` | under 80% used | | 80% to under 90%: `<card title> is <percent>% full` | 90% or more: `<card title> is <percent>% full`. `Statfs` fails: `Cannot read <card title>: <reason>` |
 
 The overall verdict is the worst of the green, yellow and red marks. Neutral marks never change it.
 If all marks are green or neutral, the verdict is `No problems found`.
 
-"Last watcher verdict" can name an older failed generation after a change that rolled back. That
-is history, not a fault, so it is always neutral.
+A rejected change shows on the Account files card, not on a card of its own: on a healthy server
+the watcher's last verdict names the generation in use, so a separate card only repeated it. The
+rejection is history, since mailctl rolled the change back and reported it then, so it never
+changes the card's mark.
 
 **Account files check.** Today the comparison is `requireCurrentMatches` in
 `internal/generate/apply.go`. It is unexported, and it runs inside a change, under the change lock.
@@ -208,7 +207,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
 - **Watcher off** (`MAILCTL_WATCHER=off`, as in `just dev` and the CI bootstrap): the watcher and
   pending cards are neutral, `Watcher is off`. The page can still show `No problems found`.
 - **Fresh install** (no `current`, no mail, no `watcher/status`): Account files `No account files yet`,
-  Last watcher verdict `No verdict yet`, Last mail in `No mail yet`. All neutral, and nothing turns
+  Last mail in `No mail yet`. All neutral, and nothing turns
   red because of the fresh install alone.
 - **Clock skew:** the heartbeat age is the UI's clock minus the file's mtime. If that comes out
   negative, the age is treated as 0 (`0 s ago`).

@@ -48,7 +48,7 @@ func TestEvaluateHealthy(t *testing.T) {
 	for _, c := range r.Cards {
 		titles = append(titles, c.Title)
 	}
-	want := []string{"Postfix watcher", "Account files", "Pending change", "Last watcher verdict", "Last mail in", "Mail and state disk"}
+	want := []string{"Postfix watcher", "Account files", "Pending change", "Last mail in", "Mail and state disk"}
 	if !slices.Equal(titles, want) {
 		t.Fatalf("cards = %v, want %v", titles, want)
 	}
@@ -114,8 +114,17 @@ func TestCards(t *testing.T) {
 			in.Watcher.Pending, in.Watcher.PendingAt, in.WatcherOff = "g2", testNow.Add(-time.Hour), true
 		}, Neutral, "Watcher is off", ""},
 
-		{"no verdict", "Last watcher verdict", func(in *Inputs) {}, Neutral, "No verdict yet", ""},
-		{"verdict", "Last watcher verdict", func(in *Inputs) { in.Watcher.Status = "applied g1" }, Neutral, "applied g1", ""},
+		{"verdict ok for current", "Account files", func(in *Inputs) { in.Watcher.Status = "g1 ok" }, Green, "In use: g1 · Matches the account store", ""},
+		{"verdict error for current", "Account files", func(in *Inputs) { in.Watcher.Status = "g1 error odd" }, Green, "In use: g1 · Matches the account store", ""},
+		{"rejected change", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 error postfix check: bad map" }, Green,
+			"In use: g1 · Matches the account store\nLast change was rejected: postfix check: bad map", ""},
+		{"rejected change, no reason", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 error" }, Green,
+			"In use: g1 · Matches the account store\nLast change was rejected: no reason given", ""},
+		{"rejected change beside a mismatch", "Account files", func(in *Inputs) {
+			in.Files.State = generate.FilesMismatch
+			in.Watcher.Status = "g2 error boom"
+		}, Red, `The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"` + "\nLast change was rejected: boom",
+			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`},
 
 		{"mail at 2h-1s", "Last mail in", func(in *Inputs) {
 			in.Boxes = map[string]Mailbox{"a": {Last: testNow.Add(-2*time.Hour + time.Second)}}
