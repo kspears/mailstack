@@ -21,6 +21,7 @@ const keepGenerations = 10
 type Config struct {
 	State      string
 	MailRoot   string
+	IndexRoot  string
 	WatcherOff bool
 	Timeout    time.Duration
 	Poll       time.Duration
@@ -32,6 +33,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		State:      cmp.Or(getenv("MAILCTL_STATE"), "/data/mailstack"),
 		MailRoot:   cmp.Or(getenv("MAILCTL_MAIL_ROOT"), "/var/vmail"),
+		IndexRoot:  cmp.Or(getenv("MAILCTL_INDEX_ROOT"), "/var/vmail_index"),
 		WatcherOff: getenv("MAILCTL_WATCHER") == "off",
 		Timeout:    30 * time.Second,
 		Poll:       100 * time.Millisecond,

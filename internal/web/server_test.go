@@ -272,7 +272,7 @@ func TestMailboxLifecycle(t *testing.T) {
 		t.Errorf("confirmation page wrong or removed early:\n%s", confirm)
 	}
 	r = u.post("/mailboxes/remove", url.Values{"address": {"alice@example.test"}})
-	wantFlash(t, r, "ok: removed alice@example.test; mail left in place at "+u.admin.MailPath("alice@example.test"))
+	wantFlash(t, r, "ok: removed alice@example.test; mail left in place at "+u.admin.MailPath("alice@example.test")+" for 30 days, then purged")
 	if len(u.snapshot().Mailboxes) != 0 {
 		t.Error("mailbox still present")
 	}

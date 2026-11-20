@@ -151,6 +151,7 @@ services:
     volumes:
       - state:/data/mailstack
       - vmail:/var/vmail
+      - vmail_index:/var/vmail_index
 
   # The admin UI. Plain HTTP on the `edge` network only, never published: the proxy is the
   # one way in. It is not on the mail network, so it cannot reach dovecot's or rspamd's
