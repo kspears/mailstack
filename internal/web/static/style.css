@@ -18,7 +18,7 @@ main > .card, main > .button, main > form, main > p { max-width: 40rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr)); gap: 0 .75rem; }
 main { padding-bottom: 3rem; }
 header { background: var(--card); border-bottom: 1px solid var(--line); }
-header nav { display: flex; flex-wrap: wrap; gap: .25rem; padding-top: .5rem; padding-bottom: .5rem; }
+header nav { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem; padding-top: .5rem; padding-bottom: .5rem; }
 header a { padding: .75rem .9rem; border-radius: .5rem; color: var(--fg); text-decoration: none; min-height: 44px; }
 header a[aria-current] { background: var(--accent); color: var(--accent-fg); }
 h1 { font-size: 1.5rem; margin: 1.25rem 0 .75rem; }
@@ -37,16 +37,14 @@ code.secret { font-size: 1.25rem; user-select: all; overflow-wrap: anywhere; col
 table { width: 100%; border-collapse: collapse; font-size: .95rem; }
 th, td { text-align: left; padding: .5rem 1.25rem .5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
 th { color: var(--muted); font-weight: 600; }
-td:first-child { color: var(--muted); font-variant-numeric: tabular-nums; }
-td:last-child { width: 100%; }
-@media (width >= 48rem) { td:last-child { white-space: normal; overflow-wrap: break-word; } }
+table:not(.list) td:first-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+table:not(.list) td:last-child { width: 100%; }
+@media (width >= 48rem) { table:not(.list) td:last-child { white-space: normal; overflow-wrap: break-word; } }
 
 /* A list table (Mailboxes): columns on a wide screen, two lines per row on a phone. */
-table.list td { color: inherit; }
-table.list td:last-child { width: auto; }
 table.list td a { color: inherit; font-weight: 600; }
 table.list td.bad { color: var(--danger); }
-table.list td.wrap { width: 100%; white-space: normal; overflow-wrap: anywhere; }
+table.list td.wrap { width: 100%; white-space: normal; overflow-wrap: break-word; }
 @media (width < 48rem) {
   table.list thead { display: none; }
   table.list tr { display: block; padding: .6rem 0; border-bottom: 1px solid var(--line); }
@@ -72,15 +70,13 @@ details.add[open] summary { margin-bottom: .25rem; }
 .verdict.yellow, .check.yellow { background: var(--warn-bg); color: var(--warn-fg); }
 .verdict.red, .check.red { background: var(--err-bg); color: var(--err-fg); }
 .check small, .check span { display: block; }
-.check span { white-space: pre-line; }
 .check small { opacity: .8; }
 .note { font-size: .9rem; }
 
-header nav { align-items: center; }
 /* Who is signed in, and the way out, together at the end of the nav. */
 header .me { display: flex; align-items: center; gap: .25rem; margin-left: auto; }
-header .me a { color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
-header .me a[aria-current] { color: var(--accent-fg); }
+header .me a { font-size: .9rem; overflow-wrap: anywhere; }
+header .me a:not([aria-current]) { color: var(--muted); }
 header .me button { width: auto; min-height: 44px; margin: 0; padding: .4rem .9rem; font-size: .9rem; }
 /* Sign-in pages */
 img.qr { display: block; background: #fff; padding: .5rem; border-radius: .5rem; image-rendering: pixelated; }

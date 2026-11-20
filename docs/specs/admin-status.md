@@ -76,7 +76,7 @@ state, so nothing new goes in the change log.
 ### Mailboxes list
 
 1. The admin opens Mailboxes. `Add a mailbox` is at the top, folded; it opens by itself when
-   there are no mailboxes yet or the last add failed.
+   there are no mailboxes yet.
 2. The mailboxes are a table: Address, Name, State, Last delivery (`<age> ago`, `No mail yet`
    when the mailbox has no delivered message, or `Cannot read mail folder`), and Size. On a
    phone each row folds to two lines: the address, then the other columns joined by ` · `.

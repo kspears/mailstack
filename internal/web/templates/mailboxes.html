@@ -1,5 +1,5 @@
 {{define "mailboxes"}}{{template "head" .}}
-<details class="card add"{{if or (not .Data) .IsErr}} open{{end}}><summary>Add a mailbox</summary>
+<details class="card add"{{if not .Data}} open{{end}}><summary>Add a mailbox</summary>
 <form method="post" action="/mailboxes/add">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="a-address">Address</label>

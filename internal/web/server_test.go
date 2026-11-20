@@ -289,7 +289,7 @@ func TestAliasLifecycle(t *testing.T) {
 	if a := u.snapshot().Aliases; len(a) != 1 || a[0].Address != "info@example.test" {
 		t.Fatalf("aliases = %+v", a)
 	}
-	if !strings.Contains(r.body, `info@example.test</a></td><td class="wrap">alice@example.test, bob@example.test</td>`) {
+	if !strings.Contains(r.body, "info@example.test</a></td><td class=\"wrap\">alice@example.test,​ bob@example.test</td>") {
 		t.Errorf("alias list lacks targets:\n%s", r.body)
 	}
 	if e := u.get("/aliases/edit?address=info@example.test"); !strings.Contains(e.body, `value="alice@example.test, bob@example.test"`) {
@@ -594,15 +594,12 @@ func TestMailboxesShowLastDelivery(t *testing.T) {
 	}
 }
 
-func TestAddFormOpensWhenListIsEmptyOrAddFailed(t *testing.T) {
+func TestAddFormOpensAboveAnEmptyList(t *testing.T) {
 	u := newUI(t)
-	if body := u.get("/aliases").body; !strings.Contains(body, `<details class="card add" open>`) {
-		t.Errorf("the add form is folded above an empty alias list:\n%s", body)
-	}
-	u.addAlice()
-	r := u.post("/mailboxes/add", url.Values{"address": {"alice@example.test"}, "password": {pw}, "password2": {pw}})
-	if !strings.Contains(r.body, "error:") || !strings.Contains(r.body, `<details class="card add" open>`) {
-		t.Errorf("the add form is folded after a failed add:\n%s", r.body)
+	for _, p := range []string{"/mailboxes", "/aliases"} {
+		if body := u.get(p).body; !strings.Contains(body, `<details class="card add" open>`) {
+			t.Errorf("%s: the add form is folded above an empty list:\n%s", p, body)
+		}
 	}
 }
 
