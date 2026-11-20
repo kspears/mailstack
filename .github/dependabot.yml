@@ -1,0 +1,35 @@
+# Weekly update PRs. Minor and patch updates come as one PR per ecosystem; a major
+# version comes on its own. A release is proposed only once it is a week old, so a
+# compromised version has time to be pulled before it reaches a PR.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      go:
+        update-types: [minor, patch]
+
+  # The images' base layers, pinned by tag and digest.
+  - package-ecosystem: docker
+    directories: [/images/admin, /images/postfix, /images/unbound]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
