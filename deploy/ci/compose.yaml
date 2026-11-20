@@ -146,11 +146,13 @@ services:
     environment: &mailctl_env
       MAILCTL_STATE: /data/mailstack
       MAILCTL_MAIL_ROOT: /var/vmail
+      MAILCTL_INDEX_ROOT: /var/vmail_index
       # Also needed on the command line: an enrolment link names the hostname.
       MAILCTL_ADMIN_HOST: admin.example.test
     volumes:
       - state:/data/mailstack
       - vmail:/var/vmail
+      - vmail_index:/var/vmail_index
 
   # The admin UI. Plain HTTP on the `edge` network only, never published: the proxy is the
   # one way in. It is not on the mail network, so it cannot reach dovecot's or rspamd's

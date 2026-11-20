@@ -135,17 +135,20 @@ func (e *env) ok(summary string, err error) error {
 }
 
 func (e *env) mailbox(a *generate.Admin, args []string) error {
-	const u = "mailbox list|add <address> [--name <display name>] [--adopt-existing-mail]|passwd <address>|state <address> active|receive-only|disabled|remove <address>"
+	const u = "mailbox list|add <address> [--name <display name>] [--adopt-existing-mail]|passwd <address>|state <address> active|receive-only|disabled|remove <address>|purge-removed [--dry-run]"
 	if len(args) == 0 {
 		return usageError(u)
 	}
 	var name string
-	var adopt bool
+	var adopt, dryRun bool
 	fs := flag.NewFlagSet("mailbox", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if args[0] == "add" {
+	switch args[0] {
+	case "add":
 		fs.StringVar(&name, "name", "", "")
 		fs.BoolVar(&adopt, "adopt-existing-mail", false, "")
+	case "purge-removed":
+		fs.BoolVar(&dryRun, "dry-run", false, "")
 	}
 	pos, err := parseInterspersed(fs, args[1:])
 	if err != nil {
@@ -179,6 +182,12 @@ func (e *env) mailbox(a *generate.Admin, args []string) error {
 		return e.ok(a.SetMailboxState(actor, pos[0], state))
 	case args[0] == "remove" && len(pos) == 1:
 		return e.ok(a.RemoveMailbox(actor, pos[0]))
+	case args[0] == "purge-removed" && len(pos) == 0:
+		done, err := a.PurgeRemoved(actor, dryRun)
+		for _, line := range done {
+			fmt.Fprintln(e.stdout, "ok: "+line)
+		}
+		return err
 	}
 	return usageError(u)
 }

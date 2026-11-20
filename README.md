@@ -105,12 +105,34 @@ store is created as usual.
 |---|---|---|
 | `MAILCTL_STATE` | `/data/mailstack` | state directory |
 | `MAILCTL_MAIL_ROOT` | `/var/vmail` | mail lives in `<root>/<domain>/<localpart>`; used to find existing mail and in messages, never written to a generated file |
+| `MAILCTL_INDEX_ROOT` | `/var/vmail_index` | dovecot's indexes, `<root>/<address>`; written only by `mailbox purge-removed` |
 | `MAILCTL_APPLY_TIMEOUT` | `30s` | how long to wait for the watcher's `status` |
 | `MAILCTL_WATCHER` | unset | `off` skips the wait (tests, first bootstrap) |
 
 The change log names the operator from `SUDO_USER`, then `USER`. A host wrapper that runs
 `docker compose run admin ...` must pass it in (`-e SUDO_USER`), or every CLI change is
 logged as the container's user.
+
+## Mail of removed mailboxes
+
+Removing a mailbox leaves its mail on disk, so a mistaken removal can be undone with
+`mailctl mailbox add <address> --adopt-existing-mail`, and the address cannot be given to
+someone else while the old mail is there. `mailctl mailbox purge-removed` deletes the mail and
+index directories of every mailbox removed more than 30 days ago that has not been added back,
+and records `mailbox.purge` in the change log. It only touches addresses whose latest removal
+is in the change log and not yet purged, so mail restored by hand after a purge stays. It
+refuses symlinks, and refuses to run at all when the store does not match the files in use.
+An address it cannot purge is reported and the rest still are. `--dry-run` lists what it
+would delete; run it once by hand before scheduling, since the first run also takes every
+older removal.
+
+Run it daily, after the backup, from a container with the mail root and the index root
+mounted read-write. Give it its own service rather than the web UI's: the UI needs neither
+read-write. In the reference stack the CLI `admin` service has both:
+
+```
+docker compose run --rm -T admin mailbox purge-removed
+```
 
 ## Junk training
 

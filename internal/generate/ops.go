@@ -150,7 +150,7 @@ func (a *Admin) RemoveMailbox(actor, address string) (string, error) {
 		if err := tx.RemoveMailbox(addr); err != nil {
 			return change{}, err
 		}
-		return change{"mailbox.remove", addr, fmt.Sprintf("removed %s; mail left in place at %s", addr, a.MailPath(addr))}, nil
+		return change{"mailbox.remove", addr, fmt.Sprintf("removed %s; mail left in place at %s; mailbox purge-removed deletes it after %d days", addr, a.MailPath(addr), purgeAfterDays)}, nil
 	})
 }
 
