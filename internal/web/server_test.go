@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -188,7 +190,7 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 	for _, session := range []string{"", "not-a-session", signedIn + "x"} {
 		u.session = session
 		for _, tc := range []struct{ method, path string }{
-			{"GET", "/"}, {"GET", "/mailboxes"}, {"GET", "/mailboxes/edit?address=a@example.test"}, {"GET", "/mailboxes/remove?address=a@example.test"},
+			{"GET", "/"}, {"GET", "/status"}, {"GET", "/mailboxes"}, {"GET", "/mailboxes/edit?address=a@example.test"}, {"GET", "/mailboxes/remove?address=a@example.test"},
 			{"POST", "/mailboxes/add"}, {"POST", "/mailboxes/password"}, {"POST", "/mailboxes/state"}, {"POST", "/mailboxes/remove"},
 			{"GET", "/aliases"}, {"GET", "/aliases/edit?address=a@example.test"}, {"POST", "/aliases/add"}, {"POST", "/aliases/targets"}, {"POST", "/aliases/remove"},
 			{"POST", "/sendas/add"}, {"POST", "/sendas/remove"},
@@ -228,7 +230,7 @@ func TestGetNeverMutates(t *testing.T) {
 	u := newUI(t)
 	u.addAlice()
 	before, _ := u.admin.Log()
-	for _, p := range []string{"/mailboxes", "/mailboxes/edit?address=alice@example.test", "/mailboxes/remove?address=alice@example.test", "/mailboxes/add", "/aliases", "/domains", "/sendas", "/log", "/"} {
+	for _, p := range []string{"/mailboxes", "/mailboxes/edit?address=alice@example.test", "/mailboxes/remove?address=alice@example.test", "/mailboxes/add", "/aliases", "/domains", "/sendas", "/log", "/status", "/"} {
 		u.get(p)
 	}
 	after, _ := u.admin.Log()
@@ -418,7 +420,7 @@ func TestNoPasswordInAnyResponse(t *testing.T) {
 
 func TestSecurityHeadersAndReadOnlyPages(t *testing.T) {
 	u := newUI(t)
-	for _, p := range []string{"/mailboxes", "/aliases", "/domains", "/sendas", "/log", "/static/style.css", "/no/such/page"} {
+	for _, p := range []string{"/status", "/mailboxes", "/aliases", "/domains", "/sendas", "/log", "/static/style.css", "/no/such/page"} {
 		r := u.get(p)
 		for k, v := range map[string]string{
 			"Content-Security-Policy": csp,
@@ -508,3 +510,61 @@ func TestGeneratedPasswordIsShownOnceAndWorks(t *testing.T) {
 		t.Errorf("failed generate: status %d body %q", r.code, r.body)
 	}
 }
+
+func TestStatusPage(t *testing.T) {
+	u := newUI(t)
+	if r := u.get("/"); r.code != http.StatusSeeOther || r.header.Get("Location") != "/status" {
+		t.Errorf("GET /: %d to %q, want /status", r.code, r.header.Get("Location"))
+	}
+	r := u.get("/status")
+	if r.code != http.StatusOK || strings.Contains(r.body, "<script") {
+		t.Fatalf("status page: %d\n%s", r.code, r.body)
+	}
+	for _, want := range []string{`<a href="/status" aria-current="page">Status</a>`, "Postfix watcher", "Watcher is off",
+		"Account files", "Matches the account store", "Pending change", "No verdict yet", "Last mail in", "No mail yet",
+		"It does not check dovecot", "Checked at ", "Mail scanned at "} {
+		if !strings.Contains(html.UnescapeString(r.body), want) {
+			t.Errorf("status page lacks %q:\n%s", want, r.body)
+		}
+	}
+	// The navigation lists Status first.
+	if i, j := strings.Index(r.body, `href="/status"`), strings.Index(r.body, `href="/mailboxes"`); i < 0 || i > j {
+		t.Errorf("Status is not the first nav link")
+	}
+}
+
+func TestMailboxesShowLastDelivery(t *testing.T) {
+	u := newUI(t)
+	u.addAlice()
+	if _, err := u.admin.AddMailbox("cli:test", "bob@example.test", "", pw, false); err != nil {
+		t.Fatal(err)
+	}
+	junk := filepath.Join(u.admin.MailPath("alice@example.test"), "Maildir", ".Junk", "new")
+	if err := os.MkdirAll(junk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	msg := filepath.Join(junk, "1.eml")
+	if err := os.WriteFile(msg, []byte("Subject: hi\n\nhello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	then := time.Now().Add(-3 * time.Minute)
+	if err := os.Chtimes(msg, then, then); err != nil {
+		t.Fatal(err)
+	}
+	body := html.UnescapeString(u.get("/mailboxes").body)
+	if !regexpMatch(`alice@example\.test</b><small>[^<]*</small><small>Last delivery 3 min ago · [0-9.]+ KiB</small>`, body) {
+		t.Errorf("alice's row lacks her last delivery:\n%s", body)
+	}
+	if !strings.Contains(body, "bob@example.test</b><small>active</small><small>No mail yet · 0 B</small>") {
+		t.Errorf("bob's row:\n%s", body)
+	}
+}
+
+func TestLogTimesArePacific(t *testing.T) {
+	u := newUI(t)
+	if body := u.get("/log").body; !strings.Contains(body, "<th>Time</th>") || !regexpMatch(`<td>\d{4}-\d\d-\d\d \d\d:\d\d P[SD]T</td>`, body) {
+		t.Errorf("log times are not in Pacific time:\n%s", body)
+	}
+}
+
+func regexpMatch(pattern, s string) bool { return regexp.MustCompile(pattern).MatchString(s) }

@@ -1,6 +1,6 @@
 {{define "signin"}}{{template "head" .}}
 <div class="card">
-<button type="button" data-passkey="get" data-begin="/signin/passkey/begin" data-finish="/signin/passkey/finish" data-next="/mailboxes" data-csrf="{{.CSRF}}">Sign in with a passkey</button>
+<button type="button" data-passkey="get" data-begin="/signin/passkey/begin" data-finish="/signin/passkey/finish" data-next="/status" data-csrf="{{.CSRF}}">Sign in with a passkey</button>
 <p id="passkey-status" class="muted" role="status"></p>
 </div>
 <h2>Or with your password</h2>

@@ -187,7 +187,7 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.startSession(w, token)
-	http.Redirect(w, r, "/mailboxes", http.StatusSeeOther)
+	http.Redirect(w, r, "/status", http.StatusSeeOther)
 }
 
 func (s *server) signOut(w http.ResponseWriter, r *http.Request) {
