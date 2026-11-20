@@ -26,11 +26,7 @@ func (c *Cache) Get(paths map[string]string) (map[string]Mailbox, time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if now := c.now(); c.boxes == nil || now.Sub(c.at) >= c.ttl {
-		c.boxes = make(map[string]Mailbox, len(paths))
-		for addr, dir := range paths {
-			c.boxes[addr] = c.scan(dir)
-		}
-		c.at = now
+		c.boxes, c.at = make(map[string]Mailbox, len(paths)), now
 	}
 	out := make(map[string]Mailbox, len(paths))
 	for addr, dir := range paths {

@@ -1,6 +1,7 @@
 package status
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"time"
@@ -42,19 +43,15 @@ type DiskInput struct {
 }
 
 type Inputs struct {
-	Now           time.Time
-	WatcherOff    bool
-	Heartbeat     time.Time // zero when missing
-	HeartbeatErr  error     // reading it failed for a reason other than its absence
-	Files         generate.FilesCheck
-	FilesErr      error
-	Pending       string
-	PendingAt     time.Time
-	Timeout       time.Duration
-	WatcherStatus string
-	Boxes         map[string]Mailbox
-	MailDisk      DiskInput
-	StateDisk     DiskInput
+	Now        time.Time
+	WatcherOff bool
+	Watcher    generate.WatcherState
+	Files      generate.FilesCheck
+	FilesErr   error // explains FilesError, or a FilesMismatch caused by an unreadable current
+	Timeout    time.Duration
+	Boxes      map[string]Mailbox
+	MailDisk   DiskInput
+	StateDisk  DiskInput
 }
 
 const (
@@ -70,11 +67,12 @@ type check struct {
 
 // Evaluate turns the gathered inputs into the cards, verdict and reasons.
 func Evaluate(in Inputs) Report {
+	verdict := cmp.Or(in.Watcher.Status, "No verdict yet")
 	checks := []check{
 		watcherCheck(in),
 		filesCheck(in),
 		pendingCheck(in),
-		{Card: Card{"Last watcher verdict", Neutral, orDefault(in.WatcherStatus, "No verdict yet")}},
+		{Card: Card{"Last watcher verdict", Neutral, verdict}},
 		mailCheck(in),
 	}
 	checks = append(checks, diskChecks(in)...)
@@ -101,13 +99,6 @@ func Evaluate(in Inputs) Report {
 	return r
 }
 
-func orDefault(s, def string) string {
-	if s == "" {
-		return def
-	}
-	return s
-}
-
 func problem(title string, m Mark, value string) check {
 	return check{Card{title, m, value}, []string{value}}
 }
@@ -117,12 +108,12 @@ func watcherCheck(in Inputs) check {
 	switch {
 	case in.WatcherOff:
 		return check{Card: Card{title, Neutral, "Watcher is off"}}
-	case in.HeartbeatErr != nil:
-		return problem(title, Red, fmt.Sprintf("Cannot read the watcher heartbeat: %v", in.HeartbeatErr))
-	case in.Heartbeat.IsZero():
+	case in.Watcher.HeartbeatErr != nil:
+		return problem(title, Red, fmt.Sprintf("Cannot read the watcher heartbeat: %v", in.Watcher.HeartbeatErr))
+	case in.Watcher.Heartbeat.IsZero():
 		return problem(title, Yellow, "Postfix watcher has not reported yet")
 	}
-	age := in.Now.Sub(in.Heartbeat)
+	age := in.Now.Sub(in.Watcher.Heartbeat)
 	if age > heartbeatMax {
 		return problem(title, Red, "Postfix watcher last seen "+Age(age)+" ago")
 	}
@@ -131,14 +122,14 @@ func watcherCheck(in Inputs) check {
 
 func filesCheck(in Inputs) check {
 	const title = "Account files"
-	switch {
-	case in.FilesErr != nil && in.Files.State != generate.FilesMismatch:
+	switch in.Files.State {
+	case generate.FilesError:
 		return problem(title, Red, fmt.Sprintf("Cannot check the account files: %v", in.FilesErr))
-	case in.Files.State == generate.FilesNone:
+	case generate.FilesNone:
 		return check{Card: Card{title, Neutral, "No account files yet"}}
-	case in.Files.State == generate.FilesBusy:
+	case generate.FilesBusy:
 		return check{Card: Card{title, Neutral, "A change is being applied"}}
-	case in.Files.State == generate.FilesMismatch:
+	case generate.FilesMismatch:
 		reason := `The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`
 		value := reason
 		if in.FilesErr != nil {
@@ -154,11 +145,11 @@ func pendingCheck(in Inputs) check {
 	switch {
 	case in.WatcherOff:
 		return check{Card: Card{title, Neutral, "Watcher is off"}}
-	case in.Pending == "":
+	case in.Watcher.Pending == "":
 		return check{Card: Card{title, Green, "None"}}
 	}
-	age := in.Now.Sub(in.PendingAt)
-	value := fmt.Sprintf("%s, waiting %s", in.Pending, Age(age))
+	age := in.Now.Sub(in.Watcher.PendingAt)
+	value := fmt.Sprintf("%s, waiting %s", in.Watcher.Pending, Age(age))
 	if age > in.Timeout {
 		return check{Card{title, Yellow, value}, []string{"A change has been pending for " + Age(age)}}
 	}
@@ -179,16 +170,14 @@ func mailCheck(in Inputs) check {
 		}
 	}
 
-	c := check{Card: Card{title, Green, ""}}
-	age := in.Now.Sub(newest)
-	if newest.IsZero() {
-		c.Mark, c.Value = Neutral, "No mail yet"
-	} else {
-		c.Value = fmt.Sprintf("%s (%s ago)", Stamp(newest), Age(age))
-	}
-	if !newest.IsZero() && age >= staleMail {
-		c.Mark = Yellow
-		c.reasons = append(c.reasons, "No mail received for "+Age(age))
+	c := check{Card: Card{title, Neutral, "No mail yet"}}
+	if !newest.IsZero() {
+		age := in.Now.Sub(newest)
+		c.Mark, c.Value = Green, fmt.Sprintf("%s (%s ago)", Stamp(newest), Age(age))
+		if age >= staleMail {
+			c.Mark = Yellow
+			c.reasons = append(c.reasons, "No mail received for "+Age(age))
+		}
 	}
 	if unreadable > 0 {
 		msg := fmt.Sprintf("%d mailboxes could not be read", unreadable)

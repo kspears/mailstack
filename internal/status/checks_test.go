@@ -19,7 +19,7 @@ func okDisk(used, avail, dev uint64) DiskInput {
 func healthy() Inputs {
 	return Inputs{
 		Now:       testNow,
-		Heartbeat: testNow.Add(-time.Minute),
+		Watcher:   generate.WatcherState{Heartbeat: testNow.Add(-time.Minute)},
 		Files:     generate.FilesCheck{State: generate.FilesMatch, Current: "g1"},
 		Timeout:   time.Minute,
 		Boxes:     map[string]Mailbox{"a@x": {Last: testNow.Add(-time.Hour)}},
@@ -75,14 +75,16 @@ func TestCards(t *testing.T) {
 		value  string
 		reason string
 	}{
-		{"heartbeat at 5m", "Postfix watcher", func(in *Inputs) { in.Heartbeat = testNow.Add(-5 * time.Minute) }, Green, "Last seen 5 min ago", ""},
-		{"heartbeat over 5m", "Postfix watcher", func(in *Inputs) { in.Heartbeat = testNow.Add(-5*time.Minute - time.Second) }, Red,
+		{"heartbeat at 5m", "Postfix watcher", func(in *Inputs) { in.Watcher.Heartbeat = testNow.Add(-5 * time.Minute) }, Green, "Last seen 5 min ago", ""},
+		{"heartbeat over 5m", "Postfix watcher", func(in *Inputs) { in.Watcher.Heartbeat = testNow.Add(-5*time.Minute - time.Second) }, Red,
 			"Postfix watcher last seen 5 min ago", "Postfix watcher last seen 5 min ago"},
-		{"heartbeat missing", "Postfix watcher", func(in *Inputs) { in.Heartbeat = time.Time{} }, Yellow,
+		{"heartbeat missing", "Postfix watcher", func(in *Inputs) { in.Watcher.Heartbeat = time.Time{} }, Yellow,
 			"Postfix watcher has not reported yet", "Postfix watcher has not reported yet"},
-		{"heartbeat unreadable", "Postfix watcher", func(in *Inputs) { in.Heartbeat, in.HeartbeatErr = time.Time{}, errors.New("permission denied") }, Red,
+		{"heartbeat unreadable", "Postfix watcher", func(in *Inputs) {
+			in.Watcher.Heartbeat, in.Watcher.HeartbeatErr = time.Time{}, errors.New("permission denied")
+		}, Red,
 			"Cannot read the watcher heartbeat: permission denied", "Cannot read the watcher heartbeat: permission denied"},
-		{"watcher off", "Postfix watcher", func(in *Inputs) { in.WatcherOff = true; in.Heartbeat = time.Time{} }, Neutral, "Watcher is off", ""},
+		{"watcher off", "Postfix watcher", func(in *Inputs) { in.WatcherOff = true; in.Watcher.Heartbeat = time.Time{} }, Neutral, "Watcher is off", ""},
 
 		{"files none", "Account files", func(in *Inputs) { in.Files = generate.FilesCheck{State: generate.FilesNone} }, Neutral, "No account files yet", ""},
 		{"files busy", "Account files", func(in *Inputs) { in.Files = generate.FilesCheck{State: generate.FilesBusy} }, Neutral, "A change is being applied", ""},
@@ -96,24 +98,24 @@ func TestCards(t *testing.T) {
 			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list": boom`,
 			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`},
 		{"check error", "Account files", func(in *Inputs) {
-			in.Files = generate.FilesCheck{}
+			in.Files = generate.FilesCheck{State: generate.FilesError}
 			in.FilesErr = errors.New("open lock: permission denied")
 		}, Red, "Cannot check the account files: open lock: permission denied", "Cannot check the account files: open lock: permission denied"},
 
 		{"no pending", "Pending change", func(in *Inputs) {}, Green, "None", ""},
 		{"pending at timeout", "Pending change", func(in *Inputs) {
-			in.Pending, in.PendingAt = "g2", testNow.Add(-time.Minute)
+			in.Watcher.Pending, in.Watcher.PendingAt = "g2", testNow.Add(-time.Minute)
 		}, Neutral, "g2, waiting 1 min", ""},
 		{"pending over timeout", "Pending change", func(in *Inputs) {
-			in.Pending, in.PendingAt = "g2", testNow.Add(-time.Minute-time.Second)
+			in.Watcher.Pending, in.Watcher.PendingAt = "g2", testNow.Add(-time.Minute-time.Second)
 		}, Yellow, "g2, waiting 1 min", "A change has been pending for 1 min"},
 		{"no pending, watcher off", "Pending change", func(in *Inputs) { in.WatcherOff = true }, Neutral, "Watcher is off", ""},
 		{"pending, watcher off", "Pending change", func(in *Inputs) {
-			in.Pending, in.PendingAt, in.WatcherOff = "g2", testNow.Add(-time.Hour), true
+			in.Watcher.Pending, in.Watcher.PendingAt, in.WatcherOff = "g2", testNow.Add(-time.Hour), true
 		}, Neutral, "Watcher is off", ""},
 
 		{"no verdict", "Last watcher verdict", func(in *Inputs) {}, Neutral, "No verdict yet", ""},
-		{"verdict", "Last watcher verdict", func(in *Inputs) { in.WatcherStatus = "applied g1" }, Neutral, "applied g1", ""},
+		{"verdict", "Last watcher verdict", func(in *Inputs) { in.Watcher.Status = "applied g1" }, Neutral, "applied g1", ""},
 
 		{"mail at 2h-1s", "Last mail in", func(in *Inputs) {
 			in.Boxes = map[string]Mailbox{"a": {Last: testNow.Add(-2*time.Hour + time.Second)}}
@@ -176,7 +178,7 @@ func TestCards(t *testing.T) {
 func TestNeutralCardsNeverRaiseVerdict(t *testing.T) {
 	in := healthy()
 	in.WatcherOff = true
-	in.Pending, in.PendingAt = "g2", testNow.Add(-time.Hour)
+	in.Watcher.Pending, in.Watcher.PendingAt = "g2", testNow.Add(-time.Hour)
 	in.Files = generate.FilesCheck{State: generate.FilesBusy}
 	in.Boxes = nil
 	r := Evaluate(in)
@@ -212,7 +214,7 @@ func TestDiskGrouping(t *testing.T) {
 
 func TestVerdictAndReasonOrder(t *testing.T) {
 	in := healthy()
-	in.Heartbeat = time.Time{}                                                                           // yellow, card 1
+	in.Watcher.Heartbeat = time.Time{}                                                                   // yellow, card 1
 	in.Files.State = generate.FilesMismatch                                                              // red, card 2
 	in.Boxes = map[string]Mailbox{"a": {Last: testNow.Add(-3 * time.Hour)}, "b": {Err: errors.New("x")}} // two yellows
 	in.MailDisk, in.StateDisk = okDisk(950, 50, 1), okDisk(950, 50, 1)                                   // red, last
@@ -234,7 +236,7 @@ func TestVerdictAndReasonOrder(t *testing.T) {
 
 func TestHeadlines(t *testing.T) {
 	in := healthy()
-	in.Heartbeat = time.Time{}
+	in.Watcher.Heartbeat = time.Time{}
 	if r := Evaluate(in); r.Verdict != Yellow || r.Headline != "Needs attention" {
 		t.Fatalf("got %v %q", r.Verdict, r.Headline)
 	}
@@ -250,7 +252,7 @@ func TestMarkClass(t *testing.T) {
 
 func TestStaleHeartbeatAloneIsSomethingWrong(t *testing.T) {
 	in := healthy()
-	in.Heartbeat = testNow.Add(-10 * time.Minute)
+	in.Watcher.Heartbeat = testNow.Add(-10 * time.Minute)
 	r := Evaluate(in)
 	if r.Verdict != Red || r.Headline != "Something is wrong" || !slices.Equal(r.Reasons, []string{"Postfix watcher last seen 10 min ago"}) {
 		t.Errorf("got %+v", r)

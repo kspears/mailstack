@@ -1,14 +1,7 @@
 package web
 
 import (
-	"errors"
-	"io"
-	"io/fs"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"syscall"
 
 	"github.com/kspears/mailstack/internal/status"
 	"github.com/kspears/mailstack/internal/store"
@@ -29,22 +22,8 @@ func (s *server) mailBoxes(snap store.Snapshot) (map[string]status.Mailbox, stri
 func (s *server) statusPage(w http.ResponseWriter, r *http.Request) {
 	cfg := s.admin.Config()
 	now := cfg.Now()
-	in := status.Inputs{Now: now, WatcherOff: cfg.WatcherOff, Timeout: cfg.Timeout}
-	watcher := filepath.Join(cfg.State, "watcher")
-	if fi, err := os.Stat(filepath.Join(watcher, "heartbeat")); err == nil {
-		in.Heartbeat = fi.ModTime()
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		in.HeartbeatErr = err
-	}
+	in := status.Inputs{Now: now, WatcherOff: cfg.WatcherOff, Timeout: cfg.Timeout, Watcher: s.admin.Watcher()}
 	in.Files, in.FilesErr = s.admin.CheckFiles()
-	pending := filepath.Join(cfg.State, "generations", "pending")
-	if target, err := os.Readlink(pending); err == nil {
-		in.Pending, in.PendingAt = filepath.Base(target), now
-		if fi, err := os.Lstat(pending); err == nil {
-			in.PendingAt = fi.ModTime()
-		}
-	}
-	in.WatcherStatus = readWatcherStatus(filepath.Join(watcher, "status"))
 	scanned := "never"
 	if snap, err := s.admin.Snapshot(); err == nil {
 		in.Boxes, scanned = s.mailBoxes(snap)
@@ -55,22 +34,6 @@ func (s *server) statusPage(w http.ResponseWriter, r *http.Request) {
 		status.Report
 		Checked, Scanned string
 	}{status.Evaluate(in), status.Stamp(now), scanned})
-}
-
-// readWatcherStatus returns the first few KiB of watcher/status, or "" if it is missing or is
-// not a plain file. The internet-facing postfix container writes that directory, so the file
-// may be a symlink to a secret, a FIFO or an endless device; none of those is followed or read.
-func readWatcherStatus(path string) string {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	b, _ := io.ReadAll(io.LimitReader(f, 4<<10))
-	return strings.TrimSpace(string(b))
 }
 
 type mailboxRow struct {
@@ -90,15 +53,7 @@ func (s *server) mailboxes(w http.ResponseWriter, r *http.Request) {
 	rows := make([]mailboxRow, len(snap.Mailboxes))
 	for i, m := range snap.Mailboxes {
 		b := boxes[m.Address]
-		rows[i].Mailbox = m
-		switch {
-		case b.Err != nil:
-			rows[i].Line, rows[i].Err = "Cannot read mail folder", true
-		case b.Last.IsZero():
-			rows[i].Line = "No mail yet · " + status.Size(b.Size)
-		default:
-			rows[i].Line = "Last delivery " + status.Age(now.Sub(b.Last)) + " ago · " + status.Size(b.Size)
-		}
+		rows[i] = mailboxRow{m, b.Line(now), b.Err != nil}
 	}
 	s.render(w, r, "mailboxes", "mailboxes", "Mailboxes", rows)
 }

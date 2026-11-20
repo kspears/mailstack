@@ -7,21 +7,18 @@ import (
 
 func TestReadDisk(t *testing.T) {
 	dir := t.TempDir()
-	for name, path := range map[string]string{
-		"existing": dir,
-		"missing":  filepath.Join(dir, "no", "such", "dir"),
-	} {
+	var disks []Disk
+	for _, path := range []string{dir, filepath.Join(dir, "no", "such", "dir")} {
 		d, err := ReadDisk(path)
 		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+			t.Fatalf("%s: %v", path, err)
 		}
 		if d.Total == 0 {
-			t.Errorf("%s: Total = 0", name)
+			t.Errorf("%s: Total = 0", path)
 		}
+		disks = append(disks, d)
 	}
-	a, _ := ReadDisk(dir)
-	b, _ := ReadDisk(filepath.Join(dir, "missing"))
-	if a.Dev != b.Dev {
+	if a, b := disks[0], disks[1]; a.Dev != b.Dev {
 		t.Errorf("walk-up Dev = %d, want %d", b.Dev, a.Dev)
 	}
 }
