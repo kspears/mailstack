@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,8 +202,11 @@ func (a *Admin) Apply(actor string, publishEmpty bool) (string, error) {
 	})
 }
 
+// lockPath is the one lock every change takes.
+func (a *Admin) lockPath() string { return filepath.Join(a.cfg.State, "lock") }
+
 func (a *Admin) lock() (func(), error) {
-	f, err := os.OpenFile(filepath.Join(a.cfg.State, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(a.lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open lock: %w", err)
 	}
@@ -239,6 +243,110 @@ func (a *Admin) requireCurrentMatches(snap store.Snapshot) error {
 		return errors.New(msg)
 	}
 	return nil
+}
+
+// FilesState is the outcome of CheckFiles.
+type FilesState int
+
+const (
+	FilesNone     FilesState = iota // no generation published yet
+	FilesMatch                      // generations/current is what the store renders
+	FilesMismatch                   // it is not, or it cannot be read
+	FilesBusy                       // a change holds the lock right now
+	FilesError                      // the lock or the account store could not be read
+)
+
+// FilesCheck is what CheckFiles found. Current is the generation id that was compared.
+type FilesCheck struct {
+	State   FilesState
+	Current string
+}
+
+// CheckFiles compares generations/current with what the store renders, without
+// changing anything. It takes the change lock shared and never waits for it: a
+// change in progress reports FilesBusy rather than a false mismatch. The error
+// explains FilesError, or a FilesMismatch caused by an unreadable current.
+func (a *Admin) CheckFiles() (FilesCheck, error) {
+	f, err := os.Open(a.lockPath())
+	switch {
+	case err == nil:
+		defer f.Close()
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				return FilesCheck{State: FilesBusy}, nil
+			}
+			return FilesCheck{State: FilesError}, fmt.Errorf("take lock: %w", err)
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return FilesCheck{State: FilesError}, fmt.Errorf("open lock: %w", err)
+	}
+	snap, err := a.st.Snapshot()
+	if err != nil {
+		return FilesCheck{State: FilesError}, fmt.Errorf("read the account store: %w", err)
+	}
+	id, _ := os.Readlink(filepath.Join(a.gens, "current"))
+	have, exists, err := a.currentFiles()
+	if !exists {
+		return FilesCheck{State: FilesNone}, nil
+	}
+	check := FilesCheck{State: FilesMismatch, Current: filepath.Base(id)}
+	if err != nil {
+		return check, err
+	}
+	if have.Equal(Render(snap)) {
+		check.State = FilesMatch
+	}
+	return check, nil
+}
+
+// Config is the configuration the Admin was opened with.
+func (a *Admin) Config() Config { return a.cfg }
+
+// WatcherState is what the postfix watcher and pending changes have left in the
+// state directory.
+type WatcherState struct {
+	Heartbeat    time.Time // zero when the watcher has not written one
+	HeartbeatErr error     // reading it failed for a reason other than its absence
+	Pending      string    // generation id waiting for the watcher; "" when none
+	PendingAt    time.Time // when the pending link was made
+	Status       string    // watcher/status; "" when missing or not a plain file
+}
+
+// Watcher reads the watcher's files and the pending link, changing nothing.
+func (a *Admin) Watcher() WatcherState {
+	var w WatcherState
+	dir := watcherDir(a.cfg)
+	if fi, err := os.Stat(filepath.Join(dir, "heartbeat")); err == nil {
+		w.Heartbeat = fi.ModTime()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		w.HeartbeatErr = err
+	}
+	pending := filepath.Join(a.gens, "pending")
+	if target, err := os.Readlink(pending); err == nil {
+		w.Pending, w.PendingAt = filepath.Base(target), a.cfg.Now()
+		if fi, err := os.Lstat(pending); err == nil {
+			w.PendingAt = fi.ModTime()
+		}
+	}
+	w.Status = readWatcherStatus(filepath.Join(dir, "status"))
+	return w
+}
+
+// readWatcherStatus returns the first few KiB of watcher/status, trimmed, or "" if it
+// is missing or not a plain file. The internet-facing postfix container writes that
+// directory, so the file may be a symlink to a secret, a FIFO or an endless device;
+// none of those is followed or read.
+func readWatcherStatus(path string) string {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	b, _ := io.ReadAll(io.LimitReader(f, 4<<10))
+	return strings.TrimSpace(string(b))
 }
 
 // deploy writes and checks a generation, then waits for the watcher to accept it.
@@ -281,8 +389,8 @@ func (a *Admin) deploy(files Files) (string, error) {
 func (a *Admin) wait(id string) error {
 	deadline := time.Now().Add(a.cfg.Timeout)
 	for {
-		if b, err := os.ReadFile(filepath.Join(watcherDir(a.cfg), "status")); err == nil {
-			got, rest, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
+		if line := readWatcherStatus(filepath.Join(watcherDir(a.cfg), "status")); line != "" {
+			got, rest, _ := strings.Cut(line, " ")
 			if got == id {
 				if rest == "ok" {
 					return nil

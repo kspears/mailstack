@@ -40,6 +40,23 @@ write_status() {
 	return 1
 }
 
+# Touch watcher/heartbeat once per pass; the admin UI reads its mtime to tell a quiet watcher from
+# a dead one. Written like status, atomically. Failures are logged only when the state changes, so
+# a full disk does not log every second.
+write_heartbeat() {
+	tmp=$WATCHER/.heartbeat.$$
+	# The group's redirect also silences the shell's own "cannot create" message.
+	if { date -u +%Y-%m-%dT%H:%M:%SZ >"$tmp" && mv -f "$tmp" "$WATCHER/heartbeat"; } 2>/dev/null; then
+		[ -z "$hb_failing" ] || log "heartbeat writes recovered"
+		hb_failing=
+		return 0
+	fi
+	rm -f "$tmp"
+	[ -n "$hb_failing" ] || log "cannot write $WATCHER/heartbeat"
+	hb_failing=1
+	return 1
+}
+
 # Print a one-line reason and return 1 if generation $1 is not usable by postfix.
 validate() {
 	id=$1
@@ -123,9 +140,11 @@ check_current() {
 
 last_pending=
 last_reload=
+hb_failing=
 log "watching $GENS every ${INTERVAL}s"
 while :; do
 	check_pending
 	check_current
+	write_heartbeat
 	sleep "$INTERVAL"
 done

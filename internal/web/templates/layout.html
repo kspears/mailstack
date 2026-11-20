@@ -10,6 +10,7 @@
 </head>
 <body>
 {{if .Actor}}<header><nav>
+<a href="/status"{{if eq .Nav "status"}} aria-current="page"{{end}}>Status</a>
 <a href="/mailboxes"{{if eq .Nav "mailboxes"}} aria-current="page"{{end}}>Mailboxes</a>
 <a href="/aliases"{{if eq .Nav "aliases"}} aria-current="page"{{end}}>Aliases</a>
 <a href="/domains"{{if eq .Nav "domains"}} aria-current="page"{{end}}>Domains</a>

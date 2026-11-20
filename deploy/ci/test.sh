@@ -68,6 +68,13 @@ docker compose up -d --wait --wait-timeout 120 redis unbound rspamd
 docker compose up -d dovecot postfix
 probe wait postfix:25 postfix:465 postfix:587 dovecot:993 dovecot:24 dovecot:12345 rspamd:11332
 
+step "the postfix watcher keeps its heartbeat fresh"
+beat() { docker compose exec -T postfix stat -c %Y /data/mailstack/watcher/heartbeat; }
+first=$(beat) || { echo "FAIL: no watcher heartbeat"; exit 1; }
+sleep 3
+[ "$(beat)" -gt "$first" ] || { echo "FAIL: the watcher heartbeat did not move in 3 seconds"; exit 1; }
+echo "heartbeat: moving"
+
 step "mailctl changes go through the real watcher: pending -> status -> current -> reload"
 printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | expect_ok mailctl mailbox add alice@example.test --name Alice
 expect_ok mailctl alias add info@example.test alice@example.test
@@ -82,6 +89,9 @@ spam="ci-spam-$(openssl rand -hex 4)"
 probe deliver alice@example.test "$spam" "buy things" spam
 probe fetch alice@example.test "$PASSWORD" "$spam" "buy things" Junk
 probe absent alice@example.test "$PASSWORD" "$spam" INBOX
+# The status page reads delivery times from this folder, so pin its name on disk.
+docker compose exec -T dovecot sh -c 'find /var/vmail/example.test/alice/Maildir/.Junk/new /var/vmail/example.test/alice/Maildir/.Junk/cur -type f 2>/dev/null; true' | grep -q . ||
+	{ echo "FAIL: spam is not under Maildir/.Junk"; exit 1; }
 
 step "moving mail into Junk trains rspamd as spam, and back out as ham (IMAPSieve -> mailctl learn)"
 # Bayes refuses messages with too few tokens, so the body has to be a real paragraph.

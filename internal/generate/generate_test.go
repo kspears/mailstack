@@ -1,10 +1,12 @@
 package generate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -554,5 +556,61 @@ func TestApplyRefusesEmptyStoreOverUnreadableCurrent(t *testing.T) {
 	}
 	if _, err := a.Apply("cli:alex", true); err != nil {
 		t.Fatalf("apply --publish-empty: %v", err)
+	}
+}
+
+func TestCheckFiles(t *testing.T) {
+	a := newAdmin(t, false)
+	got, err := a.CheckFiles()
+	if err != nil || got.State != FilesNone {
+		t.Fatalf("fresh: %+v, %v", got, err)
+	}
+
+	if _, err := a.AddDomain("t", "example.test"); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := os.Readlink(filepath.Join(a.gens, "current"))
+	got, err = a.CheckFiles()
+	if err != nil || got.State != FilesMatch || got.Current != id {
+		t.Fatalf("after change: %+v, %v (current %q)", got, err, id)
+	}
+
+	tamperCurrent(t, a)
+	got, err = a.CheckFiles()
+	if err != nil || got.State != FilesMismatch || got.Current != id {
+		t.Fatalf("tampered: %+v, %v", got, err)
+	}
+
+	lock, err := os.OpenFile(filepath.Join(a.cfg.State, "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan FilesCheck, 1)
+	go func() { c, _ := a.CheckFiles(); done <- c }()
+	select {
+	case c := <-done:
+		if c.State != FilesBusy {
+			t.Errorf("locked: %+v, want busy", c)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CheckFiles blocked on the change lock")
+	}
+}
+
+func TestCheckFilesUnreadableCurrent(t *testing.T) {
+	a := newAdmin(t, false)
+	if err := os.Symlink("gone", filepath.Join(a.gens, "current")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.CheckFiles()
+	if err == nil || got.State != FilesMismatch || got.Current != "gone" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(a.cfg.State, "lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("CheckFiles created the lock file: %v", err)
 	}
 }

@@ -34,6 +34,7 @@ store.db                    accounts and the change log (mode 0600)
 lock                        one lock for every change, CLI and UI alike
 dkim/                       DKIM private keys from the mailcow import
 watcher/status              written by the postfix watcher: which set it last checked
+watcher/heartbeat           rewritten by the postfix watcher on every pass; its mtime shows it is alive
 generations/<id>/           one complete set of generated files
   dovecot/users             passwd-file: address and hash; uid, gid and home are empty
   postfix/domains           texthash: hosted domains
@@ -159,6 +160,21 @@ command line only.
 | `MAILCTL_TRUSTED_PROXY` | required | the proxy's IP address. Only a connection from exactly this address may say who the visitor is. One address, never a network. `serve` refuses to start without it, except under `MAILCTL_DEV=1`: every failed sign-in would otherwise be logged, and banned, under the proxy's own address |
 | `MAILCTL_CLIENT_ADDR_HEADER` | `X-Forwarded-For` | the header the proxy puts the visitor's address in; the last entry is used |
 | `MAILCTL_DEV` | unset | `1` serves over plain HTTP for local work: cookies lose `Secure` and the `__Host-` prefix. Refused unless `MAILCTL_LISTEN` is loopback (`127.0.0.1:`, `localhost:`, `[::1]:`) |
+
+### Status page
+
+`/status` is the landing page after sign-in. It reads only files the UI already mounts and changes
+nothing:
+
+- the postfix watcher's heartbeat (red after 5 minutes of silence);
+- whether `generations/current` still matches the account store;
+- any pending change, and the watcher's last verdict;
+- the newest delivery to any mailbox's Inbox or Junk (yellow after 2 hours with no mail);
+- disk use of the mail and state filesystems (yellow at 80%, red at 90%).
+
+It does not check dovecot, rspamd, DNS or reachability from outside; use an external monitor for
+those. The Mailboxes list shows each mailbox's last delivery and size. Mail scans are cached for
+60 seconds. Every time in the UI is shown in Pacific time.
 
 ### Signing in
 

@@ -22,6 +22,7 @@ import (
 
 	"github.com/kspears/mailstack/internal/auth"
 	"github.com/kspears/mailstack/internal/generate"
+	"github.com/kspears/mailstack/internal/status"
 	"github.com/kspears/mailstack/internal/store"
 	"github.com/kspears/mailstack/internal/validate"
 )
@@ -67,6 +68,7 @@ type server struct {
 	logf      func(string, ...any)
 	csrfKey   []byte
 	templates *template.Template
+	mail      *status.Cache // mail scans for the Status and Mailboxes pages
 }
 
 type ctxKey struct{}
@@ -77,11 +79,15 @@ func New(cfg Config) (http.Handler, error) {
 	if cfg.AdminHost == "" {
 		return nil, fmt.Errorf("the admin UI needs the hostname it is served on")
 	}
-	s := &server{cfg: cfg, admin: cfg.Admin, auth: cfg.Auth, logf: auth.SingleLine(cfg.Logf), csrfKey: make([]byte, 32)}
+	if cfg.Admin == nil {
+		return nil, fmt.Errorf("the admin UI needs the account store")
+	}
+	s := &server{cfg: cfg, admin: cfg.Admin, auth: cfg.Auth, logf: auth.SingleLine(cfg.Logf), csrfKey: make([]byte, 32),
+		mail: status.NewCache(time.Minute, cfg.Admin.Config().Now, status.ScanMailbox)}
 	if _, err := rand.Read(s.csrfKey); err != nil {
 		return nil, fmt.Errorf("generate CSRF key: %w", err)
 	}
-	t, err := template.New("").Funcs(template.FuncMap{"stamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") }, "join": strings.Join,
+	t, err := template.New("").Funcs(template.FuncMap{"stamp": status.Stamp, "join": strings.Join,
 		// soft lets a comma-joined target list wrap between addresses instead of inside one.
 		"soft": func(s string) string { return strings.ReplaceAll(s, ",", ",\u200b") }}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
@@ -95,9 +101,10 @@ func New(cfg Config) (http.Handler, error) {
 	static := http.StripPrefix("/static/", http.FileServerFS(sub))
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/mailboxes", http.StatusSeeOther) })
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/status", http.StatusSeeOther) })
+	mux.HandleFunc("GET /status", s.statusPage)
 	mux.Handle("GET /static/", static)
-	mux.HandleFunc("GET /mailboxes", s.list("mailboxes", "Mailboxes", func(snap store.Snapshot) any { return snap.Mailboxes }))
+	mux.HandleFunc("GET /mailboxes", s.mailboxes)
 	mux.HandleFunc("GET /mailboxes/edit", s.mailboxEdit)
 	mux.HandleFunc("GET /mailboxes/remove", s.mailboxRemoveConfirm)
 	mux.HandleFunc("POST /mailboxes/add", s.mailboxAdd)
@@ -172,7 +179,7 @@ func (s *server) guard(mux *http.ServeMux) http.Handler {
 			// Also a sign-in form left open in one tab and submitted after signing
 			// in from another: its token is the signed-out one, and there is
 			// nothing left for it to do.
-			http.Redirect(sw, r, "/mailboxes", http.StatusSeeOther)
+			http.Redirect(sw, r, "/status", http.StatusSeeOther)
 		case !read && s.refuseChange(sw, r):
 		default:
 			mux.ServeHTTP(sw, r)

@@ -126,8 +126,11 @@ func TestSignIn(t *testing.T) {
 	}
 
 	b := u.browser()
+	if page := b.get("/signin").body; !strings.Contains(page, `data-next="/status"`) {
+		t.Errorf("the passkey sign-in does not land on /status:\n%s", page)
+	}
 	code := u.code(u.secret)
-	if r := b.signIn("  Admin@Example.test ", adminPw, code); r.code != http.StatusSeeOther || r.header.Get("Location") != "/mailboxes" || !b.signedIn() {
+	if r := b.signIn("  Admin@Example.test ", adminPw, code); r.code != http.StatusSeeOther || r.header.Get("Location") != "/status" || !b.signedIn() {
 		t.Fatalf("right password and code: status %d, signed in %v", r.code, b.signedIn())
 	}
 	wantFailed(t, "the same code again", u.browser().signIn(adminEmail, adminPw, code))
@@ -169,8 +172,8 @@ func TestSignInFormIsNotForgeable(t *testing.T) {
 	}
 	// A form left open in a tab while the same browser signed in from another.
 	stale.cookies["__Host-"+sessionCookie] = b.cookies["__Host-"+sessionCookie]
-	if r := post(stale, staleForm, nil); r.code != http.StatusSeeOther || r.header.Get("Location") != "/mailboxes" {
-		t.Errorf("a stale sign-in form from a signed-in browser: %d to %q, want the mailboxes page", r.code, r.header.Get("Location"))
+	if r := post(stale, staleForm, nil); r.code != http.StatusSeeOther || r.header.Get("Location") != "/status" {
+		t.Errorf("a stale sign-in form from a signed-in browser: %d to %q, want the status page", r.code, r.header.Get("Location"))
 	}
 }
 
