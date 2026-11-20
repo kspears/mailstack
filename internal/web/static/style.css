@@ -76,7 +76,11 @@ details.add[open] summary { margin-bottom: .25rem; }
 .row small.bad { color: var(--danger); }
 
 /* Sign-in pages */
-header nav form { display: flex; margin-left: auto; }
-header nav form button { min-height: 44px; }
+header nav { align-items: center; }
+/* Who is signed in, and the way out, together at the end of the nav. */
+header .me { display: flex; align-items: center; gap: .25rem; margin-left: auto; }
+header .me a { color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+header .me a[aria-current] { color: var(--accent-fg); }
+header .me button { width: auto; min-height: 40px; margin: 0; padding: .4rem .9rem; font-size: .9rem; }
 img.qr { display: block; background: #fff; padding: .5rem; border-radius: .5rem; image-rendering: pixelated; }
 code { overflow-wrap: anywhere; }
