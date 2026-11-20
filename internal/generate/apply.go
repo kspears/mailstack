@@ -241,6 +241,63 @@ func (a *Admin) requireCurrentMatches(snap store.Snapshot) error {
 	return nil
 }
 
+// FilesState is the outcome of CheckFiles.
+type FilesState int
+
+const (
+	FilesNone     FilesState = iota // no generation published yet
+	FilesMatch                      // generations/current is what the store renders
+	FilesMismatch                   // it is not, or it cannot be read
+	FilesBusy                       // a change holds the lock right now
+)
+
+// FilesCheck is what CheckFiles found. Current is the generation id that was compared.
+type FilesCheck struct {
+	State   FilesState
+	Current string
+}
+
+// CheckFiles compares generations/current with what the store renders, without
+// changing anything. It takes the change lock shared and never waits for it: a
+// change in progress reports FilesBusy rather than a false mismatch. The error is
+// set only for a mismatch caused by an unreadable current, or when the store
+// cannot be read.
+func (a *Admin) CheckFiles() (FilesCheck, error) {
+	f, err := os.Open(filepath.Join(a.cfg.State, "lock"))
+	switch {
+	case err == nil:
+		defer f.Close()
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				return FilesCheck{State: FilesBusy}, nil
+			}
+			return FilesCheck{}, fmt.Errorf("take lock: %w", err)
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return FilesCheck{}, fmt.Errorf("open lock: %w", err)
+	}
+	snap, err := a.st.Snapshot()
+	if err != nil {
+		return FilesCheck{}, err
+	}
+	id, _ := os.Readlink(filepath.Join(a.gens, "current"))
+	have, exists, err := a.currentFiles()
+	if !exists {
+		return FilesCheck{State: FilesNone}, nil
+	}
+	check := FilesCheck{State: FilesMismatch, Current: filepath.Base(id)}
+	if err != nil {
+		return check, err
+	}
+	if have.Equal(Render(snap)) {
+		check.State = FilesMatch
+	}
+	return check, nil
+}
+
+// Config is the configuration the Admin was opened with.
+func (a *Admin) Config() Config { return a.cfg }
+
 // deploy writes and checks a generation, then waits for the watcher to accept it.
 // On any failure the generation and pending link are gone and current is untouched.
 func (a *Admin) deploy(files Files) (string, error) {
