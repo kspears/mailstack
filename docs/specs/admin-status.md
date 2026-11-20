@@ -62,7 +62,7 @@ state, so nothing new goes in the change log.
    `This page checks postfix's watcher, the account files and disk space. It does not check
    dovecot, spam filtering or the outside world.`
 4. Below that is one card per check, in this order. Each card has a mark: green, yellow, red, or
-   neutral (no colour, information only). Each card shows a one-line value:
+   neutral (no colour, information only). Each card shows a short value:
    - **Postfix watcher**: `Last seen 12 s ago`.
    - **Account files**: `In use: <generation id>`, plus `Matches the account store`. When `watcher/status` reports an error for a generation other than the one in use, a second line reads `Last change was rejected: <message>`.
    - **Pending change**: `None`, or `<generation id>, waiting <age>`.
@@ -75,11 +75,16 @@ state, so nothing new goes in the change log.
 
 ### Mailboxes list
 
-1. The admin opens Mailboxes.
-2. Each mailbox row keeps its address, state and name, and adds a line:
-   `Last delivery <age> ago · <size>`, or `No mail yet · <size>` when the mailbox has no
-   delivered message.
-3. Tapping the row opens the existing edit page, as today.
+1. The admin opens Mailboxes. `Add a mailbox` is at the top, folded; it opens by itself when
+   there are no mailboxes yet or the last add failed.
+2. The mailboxes are a table: Address, Name, State, Last delivery (`<age> ago`, `No mail yet`
+   when the mailbox has no delivered message, or `Cannot read mail folder`), and Size. On a
+   phone each row folds to two lines: the address, then the other columns joined by ` · `.
+3. Tapping the address opens the existing edit page.
+
+Aliases use the same table (Alias, Delivers to) with `Add an alias` folded at the top. On a wide
+screen, pages are up to 64rem wide and the Status cards tile into columns; forms and single cards
+stay 40rem wide. The signed-in address and `Sign out` sit together at the end of the nav.
 
 ### Phone use
 
@@ -158,7 +163,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
   on disk. Mail is stored encrypted and compressed (`mail_crypt`), so this is not the message size.
   It is rendered in binary units with one decimal place (`512 B`, `1.5 KiB`, `3.2 MiB`, `1.1 GiB`).
 - A mailbox whose directory does not exist, or whose mail root does not exist, shows
-  `No mail yet · 0 B`. That is not an error.
+  `No mail yet` and `0 B`. That is not an error.
 - A mailbox whose directory exists but cannot be fully read shows `Cannot read mail folder` in place
   of its line. It also counts toward the `<n> mailboxes could not be read` note on the Status page.
 - **Last mail in** on the Status page is the newest last delivery across all readable mailboxes, or
@@ -191,7 +196,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
 
   Redirects back to `/mailboxes` after a mailbox change stay as they are.
 - The nav in `layout.html` gains `Status` as its first link, with `aria-current="page"` when active.
-- `mailboxes.html` gains the last-delivery and size line.
+- `mailboxes.html` becomes a table with last-delivery and size columns.
 - The Status page loads no script. It gets the default CSP (`default-src 'none'`, as `/mailboxes`
   does), and no new CSP exceptions.
 
@@ -260,7 +265,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
       `alice@example.test` holds a file, checked directly with `ls` in the dovecot container. This
       proves the real Junk folder path; alice's Mailboxes row alone does not, since she also gets
       Inbox mail;
-    - the Mailboxes page shows a `Last delivery` line for `alice@example.test`.
+    - the Mailboxes page shows a last delivery (`<age> ago`) in `alice@example.test`'s row.
 - `just check` passes.
 
 ## Acceptance criteria
@@ -290,10 +295,10 @@ criterion 16 by a person.
 11. Given a filesystem at 79.9%, 80.0% and 90.0% used (from an injected disk reader), the disk
     card is green, yellow and red respectively. At 89.9% it reads `89%` and is yellow.
 12. Given a mailbox with one file in the Junk folder's `new` and an older one in `Maildir/cur`, its
-    Mailboxes row shows `Last delivery <age> ago`, using the age of the Junk file.
+    Mailboxes row shows `<age> ago`, using the age of the Junk file.
 13. Given a mailbox whose only file is in `Maildir/.Sent/cur`, its row shows
-    `No mail yet · <size>`, with a non-zero size. Given a mailbox with no directory, its row shows
-    `No mail yet · 0 B`.
+    `No mail yet` and a non-zero size. Given a mailbox with no directory, its row shows
+    `No mail yet` and `0 B`.
 14. Given a newest delivery 1 h 59 min ago, the Last mail in card is green. At exactly 2 hours,
     it is yellow, and the reasons include `No mail received for 2 h`.
 15. Given all marks green or neutral, the verdict line reads `No problems found` and shows no reason lines.
@@ -305,7 +310,7 @@ criterion 16 by a person.
 17. The `/status` response carries the same `Content-Security-Policy` header as `/mailboxes`, and
     its HTML has no `<script>` element.
 18. `just check` passes, and `deploy/ci/test.sh` passes, including the new heartbeat, `/status`
-    and alice `Last delivery` checks.
+    and alice last-delivery checks.
 
 ## Decisions
 
@@ -359,10 +364,10 @@ criterion 16 by a person.
 | `internal/web/signin.go` | Extended: password sign-in redirects to `/status` |
 | `internal/web/templates/signin.html` | Extended: passkey `data-next` is `/status` |
 | `internal/web/templates/layout.html` | Extended: `Status` nav link |
-| `internal/web/templates/mailboxes.html` | Extended: last-delivery and size line |
+| `internal/web/templates/mailboxes.html` | Replaced: a table with last-delivery and size columns, add form folded at the top |
 | `internal/web/templates/status.html` | New |
 | `internal/web/static/style.css` | Extended: yellow and red tokens, wrapping for long text, phone-width fixes found while checking criterion 16 |
 | `internal/web/signin_test.go` | Extended: landing-page expectations move to `/status` |
-| `deploy/ci/test.sh` | Extended: heartbeat, `/status`, and alice `Last delivery` checks |
+| `deploy/ci/test.sh` | Extended: heartbeat, `/status`, and alice last-delivery checks |
 | `deploy/ci/compose.yaml` | Left alone |
 | `README.md` | Extended: `watcher/heartbeat` in the state layout, a short Status page section |

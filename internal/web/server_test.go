@@ -585,8 +585,24 @@ func TestMailboxesShowLastDelivery(t *testing.T) {
 		t.Errorf("bob's row:\n%s", body)
 	}
 	// The add form comes before the list, so a long list does not push it out of reach.
-	if strings.Index(body, "Add a mailbox") > strings.Index(body, "alice@example.test") {
-		t.Error("the add form is below the mailbox list")
+	if i := strings.Index(body, "<summary>Add a mailbox</summary>"); i < 0 || i > strings.Index(body, "alice@example.test") {
+		t.Error("the add form is missing or below the mailbox list")
+	}
+	// Folded while there are mailboxes; open when the list is empty or an add just failed.
+	if strings.Contains(body, `<details class="card add" open>`) {
+		t.Error("the add form is open above a non-empty list")
+	}
+}
+
+func TestAddFormOpensWhenListIsEmptyOrAddFailed(t *testing.T) {
+	u := newUI(t)
+	if body := u.get("/aliases").body; !strings.Contains(body, `<details class="card add" open>`) {
+		t.Errorf("the add form is folded above an empty alias list:\n%s", body)
+	}
+	u.addAlice()
+	r := u.post("/mailboxes/add", url.Values{"address": {"alice@example.test"}, "password": {pw}, "password2": {pw}})
+	if !strings.Contains(r.body, "error:") || !strings.Contains(r.body, `<details class="card add" open>`) {
+		t.Errorf("the add form is folded after a failed add:\n%s", r.body)
 	}
 }
 

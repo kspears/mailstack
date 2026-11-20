@@ -118,6 +118,10 @@ func TestCards(t *testing.T) {
 		{"verdict error for current", "Account files", func(in *Inputs) { in.Watcher.Status = "g1 error odd" }, Green, "In use: g1 · Matches the account store", ""},
 		{"rejected change", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 error postfix check: bad map" }, Green,
 			"In use: g1 · Matches the account store\nLast change was rejected: postfix check: bad map", ""},
+		{"not an error word", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 errors here" }, Green, "In use: g1 · Matches the account store", ""},
+		{"rejected change, watcher off", "Account files", func(in *Inputs) {
+			in.Watcher.Status, in.WatcherOff = "g2 error stale", true
+		}, Green, "In use: g1 · Matches the account store", ""},
 		{"rejected change, no reason", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 error" }, Green,
 			"In use: g1 · Matches the account store\nLast change was rejected: no reason given", ""},
 		{"rejected change beside a mismatch", "Account files", func(in *Inputs) {

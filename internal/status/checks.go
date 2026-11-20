@@ -124,6 +124,9 @@ func watcherCheck(in Inputs) check {
 // line without changing the mark.
 func filesCheck(in Inputs) check {
 	c := filesState(in)
+	if in.WatcherOff {
+		return c // a verdict left from before the watcher was turned off is stale
+	}
 	if msg := rejected(in.Watcher.Status, in.Files.Current); msg != "" {
 		c.Value += "\nLast change was rejected: " + msg
 	}
@@ -134,8 +137,8 @@ func filesCheck(in Inputs) check {
 // generation other than the one in use.
 func rejected(status, current string) string {
 	id, rest, _ := strings.Cut(status, " ")
-	msg, isErr := strings.CutPrefix(rest, "error")
-	if !isErr || id == current {
+	word, msg, _ := strings.Cut(rest, " ")
+	if word != "error" || id == current {
 		return ""
 	}
 	return cmp.Or(strings.TrimSpace(msg), "no reason given")
