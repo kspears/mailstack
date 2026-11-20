@@ -123,7 +123,19 @@ def main(token):
     status, _, page, _ = b.request("GET", f"https://{ADMIN}/mailboxes")
     if status != 200 or "alice@example.test" not in page:
         fail(f"signed-in /mailboxes: {status}")
+    row = page[page.index("alice@example.test"):].split("</a>", 1)[0]
+    if "Last delivery" not in row:
+        fail(f"alice's mailbox row shows no delivery: {row}")
     print("ok: enrolled through the link and signed in, through the proxy")
+
+    status, msg, _, _ = b.request("GET", f"https://{ADMIN}/")
+    if status != 303 or msg["Location"] != "/status":
+        fail(f"signed-in /: {status} to {msg['Location']}, want /status")
+    # Never the verdict: CI runners' disks are often more than 80% full.
+    status, _, page, _ = b.request("GET", f"https://{ADMIN}/status")
+    if status != 200 or "Postfix watcher" not in page:
+        fail(f"signed-in /status: {status}")
+    print("ok: the status page and last delivery per mailbox")
 
     # The hand-off carries the sign-in to the rspamd hostname and no further.
     status, _, page, at = b.request("GET", f"https://{RSPAMD}/", follow=True)
