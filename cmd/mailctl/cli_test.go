@@ -48,7 +48,7 @@ func TestCLI(t *testing.T) {
 		{"remove targeted", []string{"mailbox", "remove", "bob@example.test"}, "", 1, "", "error: cannot remove bob@example.test: alias info@example.test still delivers to it; remove or retarget the alias first\n", false},
 		{"remove domain in use", []string{"domain", "remove", "example.test"}, "", 1, "", "error: domain example.test still has 2 mailboxes, 1 aliases and 1 send-as grants; remove them first\n", false},
 		{"remove mailbox", []string{"alias", "remove", "info@example.test"}, "", 0, "ok: removed alias info@example.test\n", "", false},
-		{"remove mailbox keeps mail", []string{"mailbox", "remove", "bob@example.test"}, "", 0, "ok: removed bob@example.test; mail left in place at " + filepath.Join(mail, "example.test", "bob") + " for 30 days, then purged\n", "", false},
+		{"remove mailbox keeps mail", []string{"mailbox", "remove", "bob@example.test"}, "", 0, "ok: removed bob@example.test; mail left in place at " + filepath.Join(mail, "example.test", "bob") + "; mailbox purge-removed deletes it after 30 days\n", "", false},
 		{"apply", []string{"apply"}, "", 0, "ok: applied current account set\n", "", false},
 		{"admin add", []string{"admin", "add", "Sam@Example.test"}, "", 0, "ok: added admin sam@example.test\nEnrolment link, valid for 24 hours and shown only now. Send it by a channel you trust:\nhttps://admin.example.test/enrol?t=", "", true},
 		{"admin add twice", []string{"admin", "add", "sam@example.test"}, "", 1, "", "error: admin sam@example.test already exists; use `mailctl admin reset` for a new enrolment link\n", false},

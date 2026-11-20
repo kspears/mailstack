@@ -49,7 +49,7 @@ func (f *purgeFixture) mkdir(p string) {
 func (f *purgeFixture) mail(local string) string { return f.a.MailPath(local + "@example.test") }
 
 func (f *purgeFixture) index(local string) string {
-	return filepath.Join(f.a.cfg.IndexRoot, local+"@example.test")
+	return f.a.IndexPath(local + "@example.test")
 }
 
 // removed adds a mailbox, gives it mail and an index, and removes it.
@@ -201,10 +201,7 @@ func TestPurgeRemovedRefusesMismatchedStore(t *testing.T) {
 	f := newPurgeFixture(t)
 	f.removed("old")
 	f.now = f.now.AddDate(0, 0, 31)
-	users := filepath.Join(f.a.gens, "current", FileUsers)
-	if err := os.WriteFile(users, []byte("old@example.test:{BLF-CRYPT}x::::::\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	tamperCurrent(t, f.a)
 	if _, err := f.purge(false); err == nil || !strings.Contains(err.Error(), "do not match") {
 		t.Fatalf("error = %v, want the mismatch refusal", err)
 	}
@@ -213,10 +210,16 @@ func TestPurgeRemovedRefusesMismatchedStore(t *testing.T) {
 	}
 }
 
-func TestPurgeRemovedNeedsAbsoluteRoots(t *testing.T) {
-	f := newPurgeFixture(t)
-	f.a.cfg.IndexRoot = ""
-	if _, err := f.purge(true); err == nil {
-		t.Fatal("ran with an empty index root")
+func TestConfigNeedsAbsoluteRoots(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"MAILCTL_MAIL_ROOT": "vmail"},
+		{"MAILCTL_INDEX_ROOT": "./index"},
+	} {
+		if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil {
+			t.Errorf("ConfigFromEnv accepted %v", env)
+		}
+	}
+	if _, err := ConfigFromEnv(func(string) string { return "" }); err != nil {
+		t.Errorf("defaults rejected: %v", err)
 	}
 }

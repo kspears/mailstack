@@ -354,7 +354,7 @@ func TestOperations(t *testing.T) {
 		{"duplicate grant", func() (string, error) { return a.AddSendAs("t", "old@example.test", "sales@example.test") }, "", "already send as"},
 		{"grant to unknown mailbox", func() (string, error) { return a.AddSendAs("t", "ghost@example.test", "sales@example.test") }, "", "no mailbox"},
 		{"remove domain in use", func() (string, error) { return a.RemoveDomain("t", "example.test") }, "", "still has 2 mailboxes, 2 aliases and 1 send-as grants"},
-		{"remove mailbox with grant", func() (string, error) { return a.RemoveMailbox("t", "old@example.test") }, "removed old@example.test; mail left in place at " + filepath.Join(a.cfg.MailRoot, "example.test", "old") + " for 30 days, then purged", ""},
+		{"remove mailbox with grant", func() (string, error) { return a.RemoveMailbox("t", "old@example.test") }, "removed old@example.test; mail left in place at " + filepath.Join(a.cfg.MailRoot, "example.test", "old") + "; mailbox purge-removed deletes it after 30 days", ""},
 		{"remove alias", func() (string, error) { return a.RemoveAlias("t", "a@example.test") }, "removed alias a@example.test", ""},
 	}
 	for _, s := range steps {

@@ -46,6 +46,9 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		}
 		cfg.Timeout = d
 	}
+	if !filepath.IsAbs(cfg.MailRoot) || !filepath.IsAbs(cfg.IndexRoot) {
+		return cfg, fmt.Errorf("MAILCTL_MAIL_ROOT=%q and MAILCTL_INDEX_ROOT=%q must be absolute paths", cfg.MailRoot, cfg.IndexRoot)
+	}
 	return cfg, nil
 }
 
@@ -119,6 +122,11 @@ func (a *Admin) Store() *store.Store { return a.st }
 func (a *Admin) MailPath(address string) string {
 	local, domain := validate.Split(address)
 	return filepath.Join(a.cfg.MailRoot, domain, local)
+}
+
+// IndexPath is where dovecot keeps a mailbox's indexes.
+func (a *Admin) IndexPath(address string) string {
+	return filepath.Join(a.cfg.IndexRoot, address)
 }
 
 type change struct{ action, subject, summary string }

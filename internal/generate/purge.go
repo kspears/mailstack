@@ -23,11 +23,6 @@ const purgeAfterDays = 30
 // touched. One address that cannot be purged does not stop the others; their
 // errors are returned together. With dryRun it only reports what it would delete.
 func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
-	for _, root := range []string{a.cfg.MailRoot, a.cfg.IndexRoot} {
-		if !filepath.IsAbs(root) {
-			return nil, fmt.Errorf("mail root %q and index root %q must be absolute paths", a.cfg.MailRoot, a.cfg.IndexRoot)
-		}
-	}
 	unlock, err := a.lock()
 	if err != nil {
 		return nil, err
@@ -65,11 +60,17 @@ func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
 		if _, err := validate.Address(addr); err != nil {
 			continue
 		}
-		_, domain := validate.Split(addr)
-		present, err := existingDirs(
-			[]string{filepath.Join(a.cfg.MailRoot, domain), a.cfg.IndexRoot},
-			[]string{a.MailPath(addr), filepath.Join(a.cfg.IndexRoot, addr)},
-		)
+		var present []string
+		var err error
+		for _, dir := range []string{a.MailPath(addr), a.IndexPath(addr)} {
+			var ok bool
+			if ok, err = existingDir(dir); err != nil {
+				break
+			}
+			if ok {
+				present = append(present, dir)
+			}
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("purge %s: %w", addr, err))
 			continue
@@ -103,24 +104,15 @@ func removeAll(paths []string) error {
 	return nil
 }
 
-// existingDirs returns the targets that exist. Each target and each parent must
-// be a real directory, not a symlink, so a planted link cannot point the delete
-// elsewhere. A missing parent means its target is missing too.
-func existingDirs(parents, targets []string) ([]string, error) {
-	var out []string
-	for i, t := range targets {
-		ok, err := realDir(parents[i])
-		if ok {
-			ok, err = realDir(t)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			out = append(out, t)
-		}
+// existingDir reports whether dir exists. It and its parent must be real
+// directories, not symlinks, so a planted link cannot point the delete
+// elsewhere. A missing parent means dir is missing too.
+func existingDir(dir string) (bool, error) {
+	ok, err := realDir(filepath.Dir(dir))
+	if ok {
+		ok, err = realDir(dir)
 	}
-	return out, nil
+	return ok, err
 }
 
 // realDir reports whether p exists as a directory, and fails on anything else at p.

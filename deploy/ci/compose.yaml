@@ -146,6 +146,7 @@ services:
     environment: &mailctl_env
       MAILCTL_STATE: /data/mailstack
       MAILCTL_MAIL_ROOT: /var/vmail
+      MAILCTL_INDEX_ROOT: /var/vmail_index
       # Also needed on the command line: an enrolment link names the hostname.
       MAILCTL_ADMIN_HOST: admin.example.test
     volumes:
