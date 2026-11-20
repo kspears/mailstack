@@ -1,6 +1,7 @@
 {{define "aliases"}}{{template "head" .}}
+{{if .Data}}<div class="grid">
 {{range .Data}}<a class="card row" href="/aliases/edit?address={{.Address}}"><b>{{.Address}}</b><small>delivers to {{join .Targets ", "}}</small></a>
-{{else}}<p>No aliases.</p>{{end}}
+{{end}}</div>{{else}}<p>No aliases.</p>{{end}}
 <h2>Add an alias</h2>
 <form class="card" method="post" action="/aliases/add">
 <input type="hidden" name="csrf" value="{{.CSRF}}">

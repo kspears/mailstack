@@ -11,7 +11,11 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main, header nav { max-width: 40rem; margin: 0 auto; padding: 0 1rem; }
+main, header nav { max-width: 64rem; margin: 0 auto; padding: 0 1rem; }
+/* Forms and running text stay at a readable width when the page is wide. */
+form.card, main > p { max-width: 40rem; }
+/* Lists of cards tile across a wide screen and stack on a phone. */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); gap: 0 .75rem; }
 main { padding-bottom: 3rem; }
 header { background: var(--card); border-bottom: 1px solid var(--line); }
 header nav { display: flex; flex-wrap: wrap; gap: .25rem; padding-top: .5rem; padding-bottom: .5rem; }
@@ -32,7 +36,6 @@ button, .button { display: block; margin-top: 1rem; background: var(--accent); c
 button.danger, .button.danger { background: var(--danger); border-color: var(--danger); color: var(--bg); }
 button.plain, .button.plain { background: transparent; color: var(--fg); border-color: var(--line); }
 code.secret { font-size: 1.25rem; user-select: all; overflow-wrap: anywhere; color: var(--fg); }
-main:has(> .scroll) { max-width: 64rem; }
 .scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .95rem; }
 th, td { text-align: left; padding: .5rem 1.25rem .5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }

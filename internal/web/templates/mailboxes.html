@@ -1,6 +1,7 @@
 {{define "mailboxes"}}{{template "head" .}}
+{{if .Data}}<div class="grid">
 {{range .Data}}<a class="card row" href="/mailboxes/edit?address={{.Address}}"><b>{{.Address}}</b><small>{{.State}}{{if .Name}} - {{.Name}}{{end}}</small><small{{if .Err}} class="bad"{{end}}>{{.Line}}</small></a>
-{{else}}<p>No mailboxes.</p>{{end}}
+{{end}}</div>{{else}}<p>No mailboxes.</p>{{end}}
 <h2>Add a mailbox</h2>
 <form class="card" method="post" action="/mailboxes/add">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
