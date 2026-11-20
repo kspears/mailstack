@@ -1,9 +1,6 @@
 {{define "aliases"}}{{template "head" .}}
-{{if .Data}}<div class="grid">
-{{range .Data}}<a class="card row" href="/aliases/edit?address={{.Address}}"><b>{{.Address}}</b><small>delivers to {{join .Targets ", "}}</small></a>
-{{end}}</div>{{else}}<p>No aliases.</p>{{end}}
-<h2>Add an alias</h2>
-<form class="card" method="post" action="/aliases/add">
+<details class="card add"{{if not .Data}} open{{end}}><summary>Add an alias</summary>
+<form method="post" action="/aliases/add">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="al-address">Alias address</label>
 <input id="al-address" name="address" type="email" autocapitalize="none" autocomplete="off" required>
@@ -11,4 +8,8 @@
 <input id="al-targets" name="targets" autocapitalize="none" autocomplete="off" required>
 <button type="submit">Add alias</button>
 </form>
+</details>
+{{if .Data}}<div class="grid">
+{{range .Data}}<a class="card row" href="/aliases/edit?address={{.Address}}"><b>{{.Address}}</b><small>delivers to {{join .Targets ", "}}</small></a>
+{{end}}</div>{{else}}<p>No aliases.</p>{{end}}
 {{template "foot" .}}{{end}}

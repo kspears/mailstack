@@ -38,8 +38,8 @@ func (s *server) statusPage(w http.ResponseWriter, r *http.Request) {
 
 type mailboxRow struct {
 	store.Mailbox
-	Line string
-	Err  bool
+	Delivery, Size string
+	Err            bool
 }
 
 func (s *server) mailboxes(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func (s *server) mailboxes(w http.ResponseWriter, r *http.Request) {
 	rows := make([]mailboxRow, len(snap.Mailboxes))
 	for i, m := range snap.Mailboxes {
 		b := boxes[m.Address]
-		rows[i] = mailboxRow{m, b.Line(now), b.Err != nil}
+		rows[i] = mailboxRow{m, b.Delivery(now), status.Size(b.Size), b.Err != nil}
 	}
 	s.render(w, r, "mailboxes", "mailboxes", "Mailboxes", rows)
 }

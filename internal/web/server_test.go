@@ -577,11 +577,15 @@ func TestMailboxesShowLastDelivery(t *testing.T) {
 		}
 	}
 	body := html.UnescapeString(u.get("/mailboxes").body)
-	if !regexpMatch(`alice@example\.test</b><small>[^<]*</small><small>Last delivery 3 min ago · [0-9.]+ KiB</small>`, body) {
+	if !regexpMatch(`alice@example\.test</a></td><td>Alice A</td><td>active</td><td>3 min ago</td><td>[0-9.]+ KiB</td>`, body) {
 		t.Errorf("alice's row lacks her last delivery:\n%s", body)
 	}
-	if !strings.Contains(body, "bob@example.test</b><small>active</small><small>No mail yet · 0 B</small>") {
+	if !strings.Contains(body, "bob@example.test</a></td><td></td><td>active</td><td>No mail yet</td><td>0 B</td>") {
 		t.Errorf("bob's row:\n%s", body)
+	}
+	// The add form comes before the list, so a long list does not push it out of reach.
+	if strings.Index(body, "Add a mailbox") > strings.Index(body, "alice@example.test") {
+		t.Error("the add form is below the mailbox list")
 	}
 }
 

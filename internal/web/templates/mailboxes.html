@@ -1,9 +1,6 @@
 {{define "mailboxes"}}{{template "head" .}}
-{{if .Data}}<div class="grid">
-{{range .Data}}<a class="card row" href="/mailboxes/edit?address={{.Address}}"><b>{{.Address}}</b><small>{{.State}}{{if .Name}} - {{.Name}}{{end}}</small><small{{if .Err}} class="bad"{{end}}>{{.Line}}</small></a>
-{{end}}</div>{{else}}<p>No mailboxes.</p>{{end}}
-<h2>Add a mailbox</h2>
-<form class="card" method="post" action="/mailboxes/add">
+<details class="card add"{{if not .Data}} open{{end}}><summary>Add a mailbox</summary>
+<form method="post" action="/mailboxes/add">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="a-address">Address</label>
 <input id="a-address" name="address" type="email" autocapitalize="none" autocomplete="off" required>
@@ -16,4 +13,10 @@
 <button type="submit">Add mailbox</button>
 <button class="plain" type="submit" name="generate" value="1" formnovalidate>Generate a password instead</button>
 </form>
+</details>
+{{if .Data}}<div class="scroll"><table class="list">
+<thead><tr><th>Address</th><th>Name</th><th>State</th><th>Last delivery</th><th>Size</th></tr></thead>
+<tbody>{{range .Data}}<tr><td><a href="/mailboxes/edit?address={{.Address}}">{{.Address}}</a></td><td>{{.Name}}</td><td>{{.State}}</td><td{{if .Err}} class="bad"{{end}}>{{.Delivery}}</td><td>{{.Size}}</td></tr>
+{{end}}</tbody>
+</table></div>{{else}}<p>No mailboxes.</p>{{end}}
 {{template "foot" .}}{{end}}
