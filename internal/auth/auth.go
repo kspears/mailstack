@@ -4,6 +4,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -47,11 +48,11 @@ const (
 	// Every refused sign-in takes at least this long, measured from its start,
 	// so the time taken does not say which check refused it.
 	failureFloor = 750 * time.Millisecond
-	// Password comparisons run in this many slots at once, and a sign-in waits
-	// at most checkWait for one. bcrypt is the costly step anyone may trigger
+	// Passwords are compared one at a time, and a sign-in waits at most
+	// checkWait for its turn. bcrypt is the costly step anyone may trigger
 	// without an account; unbounded, a flood of sign-ins takes every CPU the
-	// mail server has.
-	checkSlots = 2
+	// mail server has, and one at a time leaves the host's other CPU to mail.
+	checkSlots = 1
 	checkWait  = 2 * time.Second
 	// The longest line Logf writes, in bytes. Docker's journald driver splits a
 	// line over 16 KiB into separate entries, and the second would start with
@@ -64,8 +65,9 @@ const (
 // Service and never returned.
 var ErrSignIn = errors.New("Sign-in failed.")
 
-// ErrBusy is returned instead of checking a password while too many other
-// checks are running. It says nothing about the account.
+// ErrBusy is returned instead of checking a password while other checks hold
+// every slot. It says nothing about the account. Passkey sign-in never waits
+// for a slot.
 var ErrBusy = Problem("Too many sign-ins at once. Try again in a moment.")
 
 // A Problem is a mistake the person can correct, worded for them. Any other
@@ -101,7 +103,7 @@ type Service struct {
 	// requests cannot each see nine failures and all be allowed a tenth.
 	codes sync.Mutex
 
-	// checking holds one token per password comparison in progress.
+	// checking holds one token per password comparison in progress; see compare.
 	checking  chan struct{}
 	checkWait time.Duration
 
@@ -379,24 +381,24 @@ func (s *Service) Enrol(token, browser, pw, pw2, code string) (session string, e
 // SignIn checks an address, password and authenticator code sent together and
 // returns a new session's cookie value. from is the visitor's address, for the
 // log line a ban is made from.
-func (s *Service) SignIn(from, address, password, code string) (session string, err error) {
-	admin, err := s.checkPasswordAndCode(from, "sign-in", normalise(address), password, code)
+func (s *Service) SignIn(ctx context.Context, from, address, password, code string) (session string, err error) {
+	admin, err := s.checkPasswordAndCode(ctx, from, "sign-in", normalise(address), password, code)
 	if err != nil {
 		return "", err
 	}
 	return s.newSession(admin)
 }
 
-func (s *Service) checkPasswordAndCode(from, what, address, password, code string) (string, error) {
+func (s *Service) checkPasswordAndCode(ctx context.Context, from, what, address, password, code string) (string, error) {
 	started := time.Now()
-	admin, err := s.passwordAndCode(from, what, address, password, code)
+	admin, err := s.passwordAndCode(ctx, from, what, address, password, code)
 	if err != nil {
 		s.cfg.Sleep(time.Until(started.Add(failureFloor)))
 	}
 	return admin, err
 }
 
-func (s *Service) passwordAndCode(from, what, address, password, code string) (string, error) {
+func (s *Service) passwordAndCode(ctx context.Context, from, what, address, password, code string) (string, error) {
 	now := s.cfg.Now()
 	refuse := func(why string) (string, error) {
 		return "", s.refused(what, from, fmt.Sprintf("address=%q: %s", address, why))
@@ -415,12 +417,13 @@ func (s *Service) passwordAndCode(from, what, address, password, code string) (s
 	if len(password) > 72 {
 		password, hash = "", s.fake
 	}
-	if !s.acquire() {
-		s.cfg.Logf("%s busy from=%s", what, from)
+	passwordOK, compared := s.compare(ctx, hash, password)
+	if !compared {
+		// Logged as a failure, so a ban counts it: one source flooding the
+		// sign-in is banned like one guessing passwords.
+		s.refused(what, from, "busy: too many sign-ins at once")
 		return "", ErrBusy
 	}
-	passwordOK := bcrypt.CompareHashAndPassword(hash, []byte(password)) == nil
-	<-s.checking
 	if !usable || !passwordOK {
 		return refuse("wrong address or password")
 	}
@@ -450,18 +453,22 @@ func (s *Service) passwordAndCode(from, what, address, password, code string) (s
 	return admin.Address, nil
 }
 
-// acquire takes a slot to compare a password in, waiting up to checkWait for
-// one. The caller frees it as soon as the comparison is done, before any
-// failure delay, so slow refusals cannot hold every slot.
-func (s *Service) acquire() bool {
+// compare checks password against hash in one of the slots. It waits up to
+// checkWait for a slot, or until the visitor goes away, and reports whether
+// the comparison ran at all. The slot is freed as soon as the comparison is
+// done, before any failure delay, so slow refusals cannot hold it.
+func (s *Service) compare(ctx context.Context, hash []byte, password string) (match, ran bool) {
 	t := time.NewTimer(s.checkWait)
 	defer t.Stop()
 	select {
 	case s.checking <- struct{}{}:
-		return true
 	case <-t.C:
-		return false
+		return false, false
+	case <-ctx.Done():
+		return false, false
 	}
+	defer func() { <-s.checking }()
+	return bcrypt.CompareHashAndPassword(hash, []byte(password)) == nil, true
 }
 
 func (s *Service) newSession(address string) (string, error) {
@@ -499,8 +506,8 @@ func (s *Service) Fresh(sess store.Session) bool {
 }
 
 // Prove renews a session's proof with the password and a code.
-func (s *Service) Prove(from string, sess store.Session, password, code string) error {
-	if _, err := s.checkPasswordAndCode(from, "proof", sess.Admin, password, code); err != nil {
+func (s *Service) Prove(ctx context.Context, from string, sess store.Session, password, code string) error {
+	if _, err := s.checkPasswordAndCode(ctx, from, "proof", sess.Admin, password, code); err != nil {
 		return err
 	}
 	return s.st.MarkProved(sess.IDHash, s.cfg.Now())

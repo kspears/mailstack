@@ -240,11 +240,13 @@ What the sign-in does and does not do:
   line into separate entries, the second of which would start with text the visitor chose.
 - Every refused sign-in takes at least 750 ms, so the time taken does not say which check
   refused it.
-- At most two passwords are checked at once. A sign-in that waits more than 2 seconds for
-  its turn is refused with `Too many sign-ins at once.` and logged as
-  `sign-in busy from=<address>`, which a ban filter does not count. bcrypt is the costly
-  step anyone can trigger without an account; this keeps a flood of sign-ins from taking
-  the CPUs the mail server needs.
+- Passwords are checked one at a time. bcrypt is the costly step anyone can trigger without
+  an account, and this leaves the host's other CPU to mail during a flood. A password
+  sign-in or proof that waits more than 2 seconds for its turn, or whose visitor goes away
+  while waiting, is refused with `Too many sign-ins at once.` and logged as a failure
+  (`sign-in failed from=<address> busy: ...`), so the ban counts it: a source flooding the
+  form is banned like one guessing passwords. While a flood lasts, password sign-in may be
+  refused for everyone; passkey sign-in does no bcrypt and is never held up.
 - A session lasts 12 hours and is kept on the server, so signing out, a reset and a removal
   end it at once. Changing the password, replacing the authenticator or removing a passkey
   ends the admin's other sessions.

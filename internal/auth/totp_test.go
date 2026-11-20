@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // The SHA-1 vectors of RFC 6238, appendix B, cut to six digits.
@@ -65,15 +68,30 @@ func TestSingleLineCapsTheLength(t *testing.T) {
 }
 
 func TestPasswordChecksWaitForASlot(t *testing.T) {
-	s := &Service{checking: make(chan struct{}, 1), checkWait: 20 * time.Millisecond}
-	if !s.acquire() {
-		t.Fatal("a free slot was refused")
+	hash, err := bcrypt.GenerateFromPassword([]byte("right"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s.acquire() {
-		t.Fatal("a second check got a slot while the only one was taken")
+	s := &Service{checking: make(chan struct{}, 1), checkWait: 50 * time.Millisecond}
+	ctx := context.Background()
+	if match, ran := s.compare(ctx, hash, "right"); !match || !ran {
+		t.Fatalf("a free slot: match %v, ran %v", match, ran)
+	}
+	if len(s.checking) != 0 {
+		t.Fatal("the slot was not freed after the comparison")
+	}
+	s.checking <- struct{}{}
+	if _, ran := s.compare(ctx, hash, "right"); ran {
+		t.Fatal("a comparison ran while the only slot was taken")
+	}
+	gone, cancel := context.WithCancel(ctx)
+	cancel()
+	started := time.Now()
+	if _, ran := s.compare(gone, hash, "right"); ran || time.Since(started) >= s.checkWait {
+		t.Errorf("a visitor who went away: ran %v after %v, want an immediate refusal", ran, time.Since(started))
 	}
 	go func() { time.Sleep(5 * time.Millisecond); <-s.checking }()
-	if !s.acquire() {
-		t.Error("a check did not get the slot freed while it waited")
+	if _, ran := s.compare(ctx, hash, "wrong"); !ran {
+		t.Error("a comparison did not get the slot freed while it waited")
 	}
 }

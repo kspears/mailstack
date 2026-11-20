@@ -178,7 +178,7 @@ func (s *server) startSession(w http.ResponseWriter, token string) {
 }
 
 func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
-	token, err := s.auth.SignIn(s.from(r), r.PostFormValue("address"), r.PostFormValue("password"), r.PostFormValue("code"))
+	token, err := s.auth.SignIn(r.Context(), s.from(r), r.PostFormValue("address"), r.PostFormValue("password"), r.PostFormValue("code"))
 	if errors.Is(err, auth.ErrSignIn) || errors.Is(err, auth.ErrBusy) {
 		s.signInFailed(w, r, err)
 		return
@@ -383,7 +383,7 @@ func (s *server) accountChange(w http.ResponseWriter, r *http.Request, done stri
 
 func (s *server) prove(w http.ResponseWriter, r *http.Request) {
 	s.accountChange(w, r, "confirmed; you can make changes for the next 5 minutes", func(sess store.Session) error {
-		return s.auth.Prove(s.from(r), sess, r.PostFormValue("password"), r.PostFormValue("code"))
+		return s.auth.Prove(r.Context(), s.from(r), sess, r.PostFormValue("password"), r.PostFormValue("code"))
 	})
 }
 
