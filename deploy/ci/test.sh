@@ -64,7 +64,7 @@ step "bootstrap: first generation, written without a watcher (none is running ye
 expect_ok docker compose run --rm -T -e MAILCTL_WATCHER=off admin domain add example.test
 
 step "start the stack"
-docker compose up -d --wait --wait-timeout 120 redis rspamd
+docker compose up -d --wait --wait-timeout 120 redis unbound rspamd
 docker compose up -d dovecot postfix
 probe wait postfix:25 postfix:465 postfix:587 dovecot:993 dovecot:24 dovecot:12345 rspamd:11332
 
@@ -105,6 +105,12 @@ docker compose exec -T postfix sh -c '
 	if touch /data/mailstack/generations/probe 2>/dev/null; then echo "FAIL: postfix can write generations"; exit 1; fi
 	touch /data/mailstack/watcher/.probe && rm /data/mailstack/watcher/.probe || { echo "FAIL: postfix cannot write watcher"; exit 1; }
 	echo "postfix: generations read-only, watcher writable, no store.db"'
+# postfix and rspamd resolve through the stack's own unbound: the name exists only there.
+for svc in postfix rspamd; do
+	got=$(docker compose exec -T "$svc" getent ahostsv4 probe.unbound.test | awk 'NR==1 {print $1}')
+	[ "$got" = 192.0.2.53 ] || { echo "FAIL: $svc does not resolve through unbound (got '$got')"; exit 1; }
+	echo "$svc: resolves through unbound"
+done
 docker compose exec -T dovecot sh -c '
 	[ ! -e /data/mailstack/store.db ] && [ ! -e /data/mailstack/watcher ] || { echo "FAIL: dovecot sees more than generations"; exit 1; }
 	if touch /data/mailstack/generations/probe 2>/dev/null; then echo "FAIL: dovecot can write generations"; exit 1; fi
