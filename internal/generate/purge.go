@@ -88,7 +88,7 @@ func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
 			continue
 		}
 		if err := a.logOnly(actor, "mailbox.purge", addr); err != nil {
-			return done, err
+			return done, errors.Join(append(errs, err)...)
 		}
 		done = append(done, "purged "+what)
 	}
