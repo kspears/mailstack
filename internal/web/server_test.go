@@ -531,6 +531,25 @@ func TestStatusPage(t *testing.T) {
 	if i, j := strings.Index(r.body, `href="/status"`), strings.Index(r.body, `href="/mailboxes"`); i < 0 || i > j {
 		t.Errorf("Status is not the first nav link")
 	}
+	// With the watcher off, both the watcher and the pending card say so.
+	if n := strings.Count(r.body, "Watcher is off"); n != 2 {
+		t.Errorf("%d cards say the watcher is off, want 2", n)
+	}
+}
+
+func TestStatusPageDoesNotFollowWatcherStatusLink(t *testing.T) {
+	u := newUI(t)
+	state := u.admin.Config().State
+	secret := filepath.Join(state, "secret")
+	if err := os.WriteFile(secret, []byte("do-not-show-this"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(state, "watcher", "status")); err != nil {
+		t.Fatal(err)
+	}
+	if body := u.get("/status").body; strings.Contains(body, "do-not-show-this") || !strings.Contains(body, "No verdict yet") {
+		t.Errorf("watcher/status was followed through a symlink:\n%s", body)
+	}
 }
 
 func TestMailboxesShowLastDelivery(t *testing.T) {
@@ -539,17 +558,23 @@ func TestMailboxesShowLastDelivery(t *testing.T) {
 	if _, err := u.admin.AddMailbox("cli:test", "bob@example.test", "", pw, false); err != nil {
 		t.Fatal(err)
 	}
-	junk := filepath.Join(u.admin.MailPath("alice@example.test"), "Maildir", ".Junk", "new")
-	if err := os.MkdirAll(junk, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	msg := filepath.Join(junk, "1.eml")
-	if err := os.WriteFile(msg, []byte("Subject: hi\n\nhello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	then := time.Now().Add(-3 * time.Minute)
-	if err := os.Chtimes(msg, then, then); err != nil {
-		t.Fatal(err)
+	// A newer message in Junk and an older one in the Inbox: the row shows the Junk one.
+	maildir := filepath.Join(u.admin.MailPath("alice@example.test"), "Maildir")
+	for _, m := range []struct {
+		dir string
+		age time.Duration
+	}{{filepath.Join(maildir, ".Junk", "new"), 3 * time.Minute}, {filepath.Join(maildir, "cur"), 3 * time.Hour}} {
+		if err := os.MkdirAll(m.dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		msg := filepath.Join(m.dir, "1.eml")
+		if err := os.WriteFile(msg, []byte("Subject: hi\n\nhello\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		then := time.Now().Add(-m.age)
+		if err := os.Chtimes(msg, then, then); err != nil {
+			t.Fatal(err)
+		}
 	}
 	body := html.UnescapeString(u.get("/mailboxes").body)
 	if !regexpMatch(`alice@example\.test</b><small>[^<]*</small><small>Last delivery 3 min ago · [0-9.]+ KiB</small>`, body) {

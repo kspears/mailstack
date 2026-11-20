@@ -29,7 +29,7 @@ func ReadDisk(path string) (Disk, error) {
 	if err := syscall.Statfs(path, &fs); err != nil {
 		return Disk{}, err
 	}
-	bsize := uint64(fs.Bsize)
+	bsize := blockSize(&fs)
 	d := Disk{
 		Used:  (uint64(fs.Blocks) - uint64(fs.Bfree)) * bsize,
 		Avail: uint64(fs.Bavail) * bsize,

@@ -80,6 +80,8 @@ func TestCards(t *testing.T) {
 			"Postfix watcher last seen 5 min ago", "Postfix watcher last seen 5 min ago"},
 		{"heartbeat missing", "Postfix watcher", func(in *Inputs) { in.Heartbeat = time.Time{} }, Yellow,
 			"Postfix watcher has not reported yet", "Postfix watcher has not reported yet"},
+		{"heartbeat unreadable", "Postfix watcher", func(in *Inputs) { in.Heartbeat, in.HeartbeatErr = time.Time{}, errors.New("permission denied") }, Red,
+			"Cannot read the watcher heartbeat: permission denied", "Cannot read the watcher heartbeat: permission denied"},
 		{"watcher off", "Postfix watcher", func(in *Inputs) { in.WatcherOff = true; in.Heartbeat = time.Time{} }, Neutral, "Watcher is off", ""},
 
 		{"files none", "Account files", func(in *Inputs) { in.Files = generate.FilesCheck{State: generate.FilesNone} }, Neutral, "No account files yet", ""},
@@ -93,11 +95,10 @@ func TestCards(t *testing.T) {
 		}, Red,
 			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list": boom`,
 			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`},
-		{"store error", "Account files", func(in *Inputs) {
+		{"check error", "Account files", func(in *Inputs) {
 			in.Files = generate.FilesCheck{}
-			in.FilesErr = errors.New("bad db")
-			in.StoreErr = true
-		}, Red, "Cannot read the account store: bad db", "Cannot read the account store: bad db"},
+			in.FilesErr = errors.New("open lock: permission denied")
+		}, Red, "Cannot check the account files: open lock: permission denied", "Cannot check the account files: open lock: permission denied"},
 
 		{"no pending", "Pending change", func(in *Inputs) {}, Green, "None", ""},
 		{"pending at timeout", "Pending change", func(in *Inputs) {
@@ -106,6 +107,7 @@ func TestCards(t *testing.T) {
 		{"pending over timeout", "Pending change", func(in *Inputs) {
 			in.Pending, in.PendingAt = "g2", testNow.Add(-time.Minute-time.Second)
 		}, Yellow, "g2, waiting 1 min", "A change has been pending for 1 min"},
+		{"no pending, watcher off", "Pending change", func(in *Inputs) { in.WatcherOff = true }, Neutral, "Watcher is off", ""},
 		{"pending, watcher off", "Pending change", func(in *Inputs) {
 			in.Pending, in.PendingAt, in.WatcherOff = "g2", testNow.Add(-time.Hour), true
 		}, Neutral, "Watcher is off", ""},
@@ -124,6 +126,9 @@ func TestCards(t *testing.T) {
 		}, Green, "2026-11-20 03:59 PST (1 min ago)", ""},
 		{"no mail", "Last mail in", func(in *Inputs) { in.Boxes = map[string]Mailbox{"a": {Size: 5}} }, Neutral, "No mail yet", ""},
 		{"no boxes", "Last mail in", func(in *Inputs) { in.Boxes = nil }, Neutral, "No mail yet", ""},
+		{"unreadable box's delivery ignored", "Last mail in", func(in *Inputs) {
+			in.Boxes = map[string]Mailbox{"a": {Last: testNow.Add(-3 * time.Hour)}, "b": {Last: testNow.Add(-time.Minute), Err: errors.New("x")}}
+		}, Yellow, "2026-11-20 01:00 PST (3 h ago) · 1 mailbox could not be read", "No mail received for 3 h"},
 		{"no mail, one unreadable", "Last mail in", func(in *Inputs) {
 			in.Boxes = map[string]Mailbox{"a": {Err: errors.New("x")}}
 		}, Yellow, "No mail yet · 1 mailbox could not be read", "1 mailbox could not be read"},
@@ -207,10 +212,10 @@ func TestDiskGrouping(t *testing.T) {
 
 func TestVerdictAndReasonOrder(t *testing.T) {
 	in := healthy()
-	in.Heartbeat = time.Time{}                                                                    // yellow, card 1
-	in.Files.State = generate.FilesMismatch                                                       // red, card 2
-	in.Boxes = map[string]Mailbox{"a": {Last: testNow.Add(-3 * time.Hour), Err: errors.New("x")}} // two yellows
-	in.MailDisk, in.StateDisk = okDisk(950, 50, 1), okDisk(950, 50, 1)                            // red, last
+	in.Heartbeat = time.Time{}                                                                           // yellow, card 1
+	in.Files.State = generate.FilesMismatch                                                              // red, card 2
+	in.Boxes = map[string]Mailbox{"a": {Last: testNow.Add(-3 * time.Hour)}, "b": {Err: errors.New("x")}} // two yellows
+	in.MailDisk, in.StateDisk = okDisk(950, 50, 1), okDisk(950, 50, 1)                                   // red, last
 	r := Evaluate(in)
 	if r.Verdict != Red || r.Headline != "Something is wrong" {
 		t.Fatalf("verdict = %v %q", r.Verdict, r.Headline)
@@ -240,5 +245,14 @@ func TestMarkClass(t *testing.T) {
 		if m.Class() != want {
 			t.Errorf("%d: %q", m, m.Class())
 		}
+	}
+}
+
+func TestStaleHeartbeatAloneIsSomethingWrong(t *testing.T) {
+	in := healthy()
+	in.Heartbeat = testNow.Add(-10 * time.Minute)
+	r := Evaluate(in)
+	if r.Verdict != Red || r.Headline != "Something is wrong" || !slices.Equal(r.Reasons, []string{"Postfix watcher last seen 10 min ago"}) {
+		t.Errorf("got %+v", r)
 	}
 }

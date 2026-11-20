@@ -45,7 +45,8 @@ write_status() {
 # a full disk does not log every second.
 write_heartbeat() {
 	tmp=$WATCHER/.heartbeat.$$
-	if date -u +%Y-%m-%dT%H:%M:%SZ >"$tmp" 2>/dev/null && mv -f "$tmp" "$WATCHER/heartbeat"; then
+	# The group's redirect also silences the shell's own "cannot create" message.
+	if { date -u +%Y-%m-%dT%H:%M:%SZ >"$tmp" && mv -f "$tmp" "$WATCHER/heartbeat"; } 2>/dev/null; then
 		[ -z "$hb_failing" ] || log "heartbeat writes recovered"
 		hb_failing=
 		return 0

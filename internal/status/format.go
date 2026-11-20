@@ -34,7 +34,7 @@ func Size(n int64) string {
 	if n < 1024 {
 		return fmt.Sprintf("%d B", n)
 	}
-	units := []string{"KiB", "MiB", "GiB"}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
 	v := float64(n) / 1024
 	i := 0
 	for i < len(units)-1 && math.Round(v*10)/10 >= 1024 {

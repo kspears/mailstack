@@ -278,7 +278,7 @@ func (a *Admin) CheckFiles() (FilesCheck, error) {
 	}
 	snap, err := a.st.Snapshot()
 	if err != nil {
-		return FilesCheck{}, err
+		return FilesCheck{}, fmt.Errorf("read the account store: %w", err)
 	}
 	id, _ := os.Readlink(filepath.Join(a.gens, "current"))
 	have, exists, err := a.currentFiles()

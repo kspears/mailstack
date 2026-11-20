@@ -1,12 +1,15 @@
 package web
 
 import (
+	"errors"
+	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
-	"github.com/kspears/mailstack/internal/generate"
 	"github.com/kspears/mailstack/internal/status"
 	"github.com/kspears/mailstack/internal/store"
 )
@@ -30,9 +33,10 @@ func (s *server) statusPage(w http.ResponseWriter, r *http.Request) {
 	watcher := filepath.Join(cfg.State, "watcher")
 	if fi, err := os.Stat(filepath.Join(watcher, "heartbeat")); err == nil {
 		in.Heartbeat = fi.ModTime()
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		in.HeartbeatErr = err
 	}
 	in.Files, in.FilesErr = s.admin.CheckFiles()
-	in.StoreErr = in.FilesErr != nil && in.Files.State != generate.FilesMismatch
 	pending := filepath.Join(cfg.State, "generations", "pending")
 	if target, err := os.Readlink(pending); err == nil {
 		in.Pending, in.PendingAt = filepath.Base(target), now
@@ -40,9 +44,7 @@ func (s *server) statusPage(w http.ResponseWriter, r *http.Request) {
 			in.PendingAt = fi.ModTime()
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(watcher, "status")); err == nil {
-		in.WatcherStatus = strings.TrimSpace(string(b))
-	}
+	in.WatcherStatus = readWatcherStatus(filepath.Join(watcher, "status"))
 	scanned := "never"
 	if snap, err := s.admin.Snapshot(); err == nil {
 		in.Boxes, scanned = s.mailBoxes(snap)
@@ -53,6 +55,22 @@ func (s *server) statusPage(w http.ResponseWriter, r *http.Request) {
 		status.Report
 		Checked, Scanned string
 	}{status.Evaluate(in), status.Stamp(now), scanned})
+}
+
+// readWatcherStatus returns the first few KiB of watcher/status, or "" if it is missing or is
+// not a plain file. The internet-facing postfix container writes that directory, so the file
+// may be a symlink to a secret, a FIFO or an endless device; none of those is followed or read.
+func readWatcherStatus(path string) string {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	b, _ := io.ReadAll(io.LimitReader(f, 4<<10))
+	return strings.TrimSpace(string(b))
 }
 
 type mailboxRow struct {

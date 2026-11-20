@@ -109,7 +109,7 @@ ids, watcher error lines with paths) wraps rather than widening the page.
 |---|---|---|---|---|---|
 | Postfix watcher | mtime of `<state>/watcher/heartbeat` | updated within the last 5 minutes | `MAILCTL_WATCHER=off`: `Watcher is off` | file missing: `Postfix watcher has not reported yet` | older than 5 minutes: `Postfix watcher last seen <age> ago` |
 | Account files | `generations/current` compared with what the store renders (below) | match | `current` missing: `No account files yet`. Change lock busy: `A change is being applied` | | no match, or `current` unreadable: `The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"` |
-| Pending change | `generations/pending` symlink; age is the `Lstat` mtime of the link | absent | present and younger than `MAILCTL_APPLY_TIMEOUT`: `A change is being applied`. `MAILCTL_WATCHER=off`: `Watcher is off` | present and older than `MAILCTL_APPLY_TIMEOUT`: `A change has been pending for <age>` | |
+| Pending change | `generations/pending` symlink; age is the `Lstat` mtime of the link | absent: `None` | present and not older than `MAILCTL_APPLY_TIMEOUT`: `<generation id>, waiting <age>`. `MAILCTL_WATCHER=off`: `Watcher is off` | present and older than `MAILCTL_APPLY_TIMEOUT`: card `<generation id>, waiting <age>`, reason `A change has been pending for <age>` | |
 | Last watcher verdict | `<state>/watcher/status` | | always. Missing file: `No verdict yet` | | |
 | Last mail in | newest last delivery across all mailboxes (below) | newest delivery within the last 2 hours | no delivery in any mailbox: `No mail yet` | newest delivery 2 hours ago or older: `No mail received for <age>`. One or more mailboxes could not be read: `<n> mailboxes could not be read` | |
 | Disk | `syscall.Statfs` on `MAILCTL_MAIL_ROOT` and on `MAILCTL_STATE` | under 80% used | | 80% to under 90%: `<card title> is <percent>% full` | 90% or more: `<card title> is <percent>% full`. `Statfs` fails: `Cannot read <card title>: <reason>` |
@@ -286,7 +286,8 @@ criterion 16 by a person.
 9. Given the change lock held exclusively, the Account files card is neutral (`A change is being applied`), and the page
    is returned without waiting for the lock.
 10. Given `generations/pending` older than `MAILCTL_APPLY_TIMEOUT`, the Pending change card is
-    yellow: `A change has been pending for <age>`.
+    yellow, showing `<generation id>, waiting <age>`, and the reasons include
+    `A change has been pending for <age>`.
 11. Given a filesystem at 79.9%, 80.0% and 90.0% used (from an injected disk reader), the disk
     card is green, yellow and red respectively. At 89.9% it reads `89%` and is yellow.
 12. Given a mailbox with one file in the Junk folder's `new` and an older one in `Maildir/cur`, its
@@ -338,6 +339,8 @@ criterion 16 by a person.
 | Time zone | Pacific (`America/Los_Angeles`) on every UI page, Log included; fixed in code | The admins and family are in Pacific time | User (zone); agent default (all pages, no setting) |
 | Ages | Rounded down: `s`, `min`, `h`, `days` | | Agent default |
 | Heartbeat write failures | Logged on change of state only | Avoids a log line every second on a full disk | Agent default |
+| Read errors on the Status page | A heartbeat that exists but cannot be read is red `Cannot read the watcher heartbeat: <reason>`; a lock or store error during the files check is red `Cannot check the account files: <reason>`; a mailbox that cannot be read never counts toward Last mail in | Show the real fault instead of a misleading one | Agent default |
+| `watcher/status` on the page | Read without following symlinks, only if it is a regular file, at most 4 KiB | The internet-facing postfix container can write that directory | Agent default |
 | Auto-refresh | None | Pages load no script; reload is enough | Agent default |
 
 ## Open questions

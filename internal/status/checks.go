@@ -45,9 +45,9 @@ type Inputs struct {
 	Now           time.Time
 	WatcherOff    bool
 	Heartbeat     time.Time // zero when missing
+	HeartbeatErr  error     // reading it failed for a reason other than its absence
 	Files         generate.FilesCheck
 	FilesErr      error
-	StoreErr      bool // FilesErr came from reading the account store
 	Pending       string
 	PendingAt     time.Time
 	Timeout       time.Duration
@@ -117,6 +117,8 @@ func watcherCheck(in Inputs) check {
 	switch {
 	case in.WatcherOff:
 		return check{Card: Card{title, Neutral, "Watcher is off"}}
+	case in.HeartbeatErr != nil:
+		return problem(title, Red, fmt.Sprintf("Cannot read the watcher heartbeat: %v", in.HeartbeatErr))
 	case in.Heartbeat.IsZero():
 		return problem(title, Yellow, "Postfix watcher has not reported yet")
 	}
@@ -130,8 +132,8 @@ func watcherCheck(in Inputs) check {
 func filesCheck(in Inputs) check {
 	const title = "Account files"
 	switch {
-	case in.StoreErr:
-		return problem(title, Red, fmt.Sprintf("Cannot read the account store: %v", in.FilesErr))
+	case in.FilesErr != nil && in.Files.State != generate.FilesMismatch:
+		return problem(title, Red, fmt.Sprintf("Cannot check the account files: %v", in.FilesErr))
 	case in.Files.State == generate.FilesNone:
 		return check{Card: Card{title, Neutral, "No account files yet"}}
 	case in.Files.State == generate.FilesBusy:
@@ -150,10 +152,10 @@ func filesCheck(in Inputs) check {
 func pendingCheck(in Inputs) check {
 	const title = "Pending change"
 	switch {
-	case in.Pending == "":
-		return check{Card: Card{title, Green, "None"}}
 	case in.WatcherOff:
 		return check{Card: Card{title, Neutral, "Watcher is off"}}
+	case in.Pending == "":
+		return check{Card: Card{title, Green, "None"}}
 	}
 	age := in.Now.Sub(in.PendingAt)
 	value := fmt.Sprintf("%s, waiting %s", in.Pending, Age(age))
@@ -170,6 +172,7 @@ func mailCheck(in Inputs) check {
 	for _, b := range in.Boxes {
 		if b.Err != nil {
 			unreadable++
+			continue
 		}
 		if b.Last.After(newest) {
 			newest = b.Last

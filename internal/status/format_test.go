@@ -41,7 +41,7 @@ func TestSize(t *testing.T) {
 		{1024 * 1024, "1.0 MiB"},
 		{5 * 1024 * 1024 * 1024 / 2, "2.5 GiB"},
 		{1024*1024*1024 - 1, "1.0 GiB"},
-		{2048 * 1024 * 1024 * 1024, "2048.0 GiB"},
+		{2048 * 1024 * 1024 * 1024, "2.0 TiB"},
 	}
 	for _, tt := range tests {
 		if got := Size(tt.n); got != tt.want {
