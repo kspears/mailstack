@@ -13,6 +13,7 @@ import (
 	"rsc.io/qr"
 
 	"github.com/kspears/mailstack/internal/auth"
+	"github.com/kspears/mailstack/internal/status"
 	"github.com/kspears/mailstack/internal/store"
 )
 
@@ -361,7 +362,7 @@ func (s *server) account(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]row, len(keys))
 	for i, k := range keys {
-		rows[i] = row{base64.RawURLEncoding.EncodeToString(k.ID), k.Label, k.Created.UTC().Format("2006-01-02")}
+		rows[i] = row{base64.RawURLEncoding.EncodeToString(k.ID), k.Label, status.Day(k.Created)}
 	}
 	s.render(w, r, "account", "account", "Your sign-in", struct {
 		Fresh    bool

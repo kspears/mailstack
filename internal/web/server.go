@@ -79,6 +79,9 @@ func New(cfg Config) (http.Handler, error) {
 	if cfg.AdminHost == "" {
 		return nil, fmt.Errorf("the admin UI needs the hostname it is served on")
 	}
+	if cfg.Admin == nil {
+		return nil, fmt.Errorf("the admin UI needs the account store")
+	}
 	s := &server{cfg: cfg, admin: cfg.Admin, auth: cfg.Auth, logf: auth.SingleLine(cfg.Logf), csrfKey: make([]byte, 32),
 		mail: status.NewCache(time.Minute, cfg.Admin.Config().Now, status.ScanMailbox)}
 	if _, err := rand.Read(s.csrfKey); err != nil {

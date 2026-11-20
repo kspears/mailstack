@@ -25,7 +25,7 @@ func NewCache(ttl time.Duration, now func() time.Time, scan func(dir string) Mai
 func (c *Cache) Get(paths map[string]string) (map[string]Mailbox, time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if now := c.now(); c.boxes == nil || now.Sub(c.at) >= c.ttl {
+	if now := c.now(); c.boxes == nil || now.Before(c.at) || now.Sub(c.at) >= c.ttl {
 		c.boxes, c.at = make(map[string]Mailbox, len(paths)), now
 	}
 	out := make(map[string]Mailbox, len(paths))
