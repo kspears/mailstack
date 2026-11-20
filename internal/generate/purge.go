@@ -16,10 +16,18 @@ import (
 const purgeAfterDays = 30
 
 // PurgeRemoved deletes the mail and index directories of every mailbox removed
-// more than PurgeAfter ago that has not been added back. Mail that no removal in
+// more than purgeAfterDays ago that has not been added back since. Only the
+// latest removal of an address counts, and only while nothing purged it after
+// that, so mail restored by hand is not deleted again. Mail that no removal in
 // the change log accounts for, such as leftovers from before mailstack, is never
-// touched. With dryRun it only reports what it would delete.
+// touched. One address that cannot be purged does not stop the others; their
+// errors are returned together. With dryRun it only reports what it would delete.
 func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
+	for _, root := range []string{a.cfg.MailRoot, a.cfg.IndexRoot} {
+		if !filepath.IsAbs(root) {
+			return nil, fmt.Errorf("mail root %q and index root %q must be absolute paths", a.cfg.MailRoot, a.cfg.IndexRoot)
+		}
+	}
 	unlock, err := a.lock()
 	if err != nil {
 		return nil, err
@@ -29,18 +37,27 @@ func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A store that does not match the files in use (replaced or restored) could
+	// list as removed a mailbox the daemons still deliver to.
+	if err := a.requireCurrentMatches(snap); err != nil {
+		return nil, err
+	}
 	entries, err := a.st.Log()
 	if err != nil {
 		return nil, err
 	}
 	removed := map[string]time.Time{}
 	for _, e := range entries {
-		if e.Action == "mailbox.remove" {
+		switch e.Action {
+		case "mailbox.remove":
 			removed[e.Subject] = e.Time
+		case "mailbox.purge":
+			delete(removed, e.Subject)
 		}
 	}
 	cutoff := a.cfg.Now().AddDate(0, 0, -purgeAfterDays)
 	var done []string
+	var errs []error
 	for _, addr := range slices.Sorted(maps.Keys(removed)) {
 		if removed[addr].After(cutoff) || hasMailbox(snap, addr) {
 			continue
@@ -48,10 +65,14 @@ func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
 		if _, err := validate.Address(addr); err != nil {
 			continue
 		}
-		paths := []string{a.MailPath(addr), filepath.Join(a.cfg.IndexRoot, addr)}
-		present, err := existingDirs(paths)
+		_, domain := validate.Split(addr)
+		present, err := existingDirs(
+			[]string{filepath.Join(a.cfg.MailRoot, domain), a.cfg.IndexRoot},
+			[]string{a.MailPath(addr), filepath.Join(a.cfg.IndexRoot, addr)},
+		)
 		if err != nil {
-			return done, err
+			errs = append(errs, fmt.Errorf("purge %s: %w", addr, err))
+			continue
 		}
 		if len(present) == 0 {
 			continue
@@ -61,37 +82,60 @@ func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
 			done = append(done, "would purge "+what)
 			continue
 		}
-		for _, p := range present {
-			if err := os.RemoveAll(p); err != nil {
-				return done, fmt.Errorf("purge %s: %w; the rest is retried on the next run", addr, err)
-			}
+		if err := removeAll(present); err != nil {
+			errs = append(errs, fmt.Errorf("purge %s: %w; retried on the next run", addr, err))
+			continue
 		}
 		if err := a.logOnly(actor, "mailbox.purge", addr); err != nil {
 			return done, err
 		}
 		done = append(done, "purged "+what)
 	}
-	return done, nil
+	return done, errors.Join(errs...)
 }
 
-// existingDirs returns the paths that exist, refusing any that is not a real
-// directory so a planted symlink cannot point the delete elsewhere.
-func existingDirs(paths []string) ([]string, error) {
-	var out []string
+func removeAll(paths []string) error {
 	for _, p := range paths {
-		fi, err := os.Lstat(p)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
+		if err := os.RemoveAll(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// existingDirs returns the targets that exist. Each target and each parent must
+// be a real directory, not a symlink, so a planted link cannot point the delete
+// elsewhere. A missing parent means its target is missing too.
+func existingDirs(parents, targets []string) ([]string, error) {
+	var out []string
+	for i, t := range targets {
+		ok, err := realDir(parents[i])
+		if ok {
+			ok, err = realDir(t)
 		}
 		if err != nil {
 			return nil, err
 		}
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("%s is not a directory; remove it by hand", p)
+		if ok {
+			out = append(out, t)
 		}
-		out = append(out, p)
 	}
 	return out, nil
+}
+
+// realDir reports whether p exists as a directory, and fails on anything else at p.
+func realDir(p string) (bool, error) {
+	fi, err := os.Lstat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !fi.IsDir() {
+		return false, fmt.Errorf("%s is not a directory; remove it by hand", p)
+	}
+	return true, nil
 }
 
 // logOnly records an action that changes no account, so no generation is applied.

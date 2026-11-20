@@ -4,114 +4,219 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
 const testPassword = "correct horse battery"
 
+// purgeFixture is an admin whose clock the test controls, with helpers to make
+// mailboxes, their mail and index directories, and to remove them.
+type purgeFixture struct {
+	t   *testing.T
+	a   *Admin
+	now time.Time
+}
+
+func newPurgeFixture(t *testing.T) *purgeFixture {
+	f := &purgeFixture{t: t, a: newAdmin(t, false), now: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}
+	f.a.cfg.IndexRoot = t.TempDir()
+	// Ticks on every read: a generation's id is its time plus a content hash, and
+	// adding then removing a mailbox renders the same content twice.
+	f.a.cfg.Now = func() time.Time {
+		f.now = f.now.Add(time.Second)
+		return f.now
+	}
+	f.must(f.a.AddDomain("t", "example.test"))
+	return f
+}
+
+func (f *purgeFixture) must(_ string, err error) {
+	f.t.Helper()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *purgeFixture) mkdir(p string) {
+	f.t.Helper()
+	if err := os.MkdirAll(filepath.Join(p, "Maildir", "cur"), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *purgeFixture) mail(local string) string { return f.a.MailPath(local + "@example.test") }
+
+func (f *purgeFixture) index(local string) string {
+	return filepath.Join(f.a.cfg.IndexRoot, local+"@example.test")
+}
+
+// removed adds a mailbox, gives it mail and an index, and removes it.
+func (f *purgeFixture) removed(local string) {
+	f.t.Helper()
+	f.must(f.a.AddMailbox("t", local+"@example.test", "", testPassword, false))
+	f.mkdir(f.mail(local))
+	f.mkdir(f.index(local))
+	f.must(f.a.RemoveMailbox("t", local+"@example.test"))
+}
+
+func (f *purgeFixture) purge(dryRun bool) ([]string, error) {
+	f.t.Helper()
+	return f.a.PurgeRemoved("t", dryRun)
+}
+
+func exists(t *testing.T, p string) bool {
+	t.Helper()
+	_, err := os.Lstat(p)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return err == nil
+}
+
 func TestPurgeRemoved(t *testing.T) {
-	a := newAdmin(t, false)
-	a.cfg.IndexRoot = t.TempDir()
-	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	a.cfg.Now = func() time.Time { return now }
+	f := newPurgeFixture(t)
+	f.removed("old")
+	f.removed("back")
+	f.must(f.a.AddMailbox("t", "back@example.test", "", testPassword, true))
+	f.removed("again")
+	f.must(f.a.AddMailbox("t", "again@example.test", "", testPassword, true))
+	stray := filepath.Join(f.a.cfg.MailRoot, "example.test", "stray")
+	f.mkdir(stray)
+	f.now = f.now.AddDate(0, 0, 20)
+	f.removed("recent")
+	f.must(f.a.RemoveMailbox("t", "again@example.test"))
+	f.now = f.now.AddDate(0, 0, 11)
 
-	must := func(_ string, err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	must(a.AddDomain("t", "example.test"))
-	for _, addr := range []string{"old", "recent", "back", "gone"} {
-		must(a.AddMailbox("t", addr+"@example.test", "", testPassword, false))
-	}
-	mkdir := func(p string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(p, "Maildir", "cur"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, addr := range []string{"old", "recent", "back"} {
-		mkdir(a.MailPath(addr + "@example.test"))
-		mkdir(filepath.Join(a.cfg.IndexRoot, addr+"@example.test"))
-	}
-	stray := filepath.Join(a.cfg.MailRoot, "example.test", "stray")
-	mkdir(stray)
-
-	for _, addr := range []string{"old", "back", "gone"} {
-		must(a.RemoveMailbox("t", addr+"@example.test"))
-	}
-	must(a.AddMailbox("t", "back@example.test", "", testPassword, true))
-	now = now.AddDate(0, 0, 20)
-	must(a.RemoveMailbox("t", "recent@example.test"))
-	now = now.AddDate(0, 0, 11)
-
-	dry, err := a.PurgeRemoved("t", true)
+	dry, err := f.purge(true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"would purge mail of old@example.test, removed 2026-11-01"}; !slices.Equal(dry, want) {
 		t.Fatalf("dry run = %q, want %q", dry, want)
 	}
-	if _, err := os.Stat(a.MailPath("old@example.test")); err != nil {
-		t.Fatalf("dry run deleted mail: %v", err)
+	if !exists(t, f.mail("old")) {
+		t.Fatal("dry run deleted mail")
 	}
 
-	done, err := a.PurgeRemoved("t", false)
+	done, err := f.purge(false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"purged mail of old@example.test, removed 2026-11-01"}; !slices.Equal(done, want) {
 		t.Fatalf("purge = %q, want %q", done, want)
 	}
-	for _, p := range []string{a.MailPath("old@example.test"), filepath.Join(a.cfg.IndexRoot, "old@example.test")} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s still exists: %v", p, err)
+	for _, p := range []string{f.mail("old"), f.index("old")} {
+		if exists(t, p) {
+			t.Errorf("%s still exists", p)
 		}
 	}
-	for _, p := range []string{a.MailPath("recent@example.test"), a.MailPath("back@example.test"), filepath.Join(a.cfg.IndexRoot, "back@example.test"), stray} {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("%s was deleted: %v", p, err)
+	// recent: removed 11 days ago. back: added back. again: removed again 11 days ago.
+	for _, p := range []string{f.mail("recent"), f.mail("back"), f.index("back"), f.mail("again"), stray} {
+		if !exists(t, p) {
+			t.Errorf("%s was deleted", p)
 		}
 	}
-	log, err := a.Log()
+	log, err := f.a.Log()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if last := log[len(log)-1]; last.Action != "mailbox.purge" || last.Subject != "old@example.test" {
+	if last := log[len(log)-1]; last.Action != "mailbox.purge" || last.Subject != "old@example.test" || last.Actor != "t" {
 		t.Errorf("last log entry = %+v", last)
 	}
 
-	if again, err := a.PurgeRemoved("t", false); err != nil || len(again) != 0 {
+	// Mail put back by hand after a purge is not deleted again.
+	f.mkdir(f.mail("old"))
+	if again, err := f.purge(false); err != nil || len(again) != 0 {
 		t.Errorf("second run = %q, %v; want nothing", again, err)
+	}
+	if !exists(t, f.mail("old")) {
+		t.Error("restored mail was purged again")
 	}
 }
 
-func TestPurgeRemovedRefusesSymlink(t *testing.T) {
-	a := newAdmin(t, false)
-	a.cfg.IndexRoot = t.TempDir()
-	if _, err := a.AddDomain("t", "example.test"); err != nil {
+func TestPurgeRemovedIndexOnly(t *testing.T) {
+	f := newPurgeFixture(t)
+	f.removed("old")
+	if err := os.RemoveAll(f.mail("old")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.AddMailbox("t", "old@example.test", "", testPassword, false); err != nil {
-		t.Fatal(err)
+	f.now = f.now.AddDate(0, 0, 31)
+	if done, err := f.purge(false); err != nil || len(done) != 1 {
+		t.Fatalf("purge = %q, %v; want one", done, err)
 	}
-	if _, err := a.RemoveMailbox("t", "old@example.test"); err != nil {
-		t.Fatal(err)
+	if exists(t, f.index("old")) {
+		t.Error("index left behind")
 	}
+}
+
+func TestPurgeRemovedRefusesSymlinks(t *testing.T) {
+	f := newPurgeFixture(t)
+	f.removed("aaa")
+	f.removed("zzz")
 	target := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(a.cfg.MailRoot, "example.test"), 0o755); err != nil {
+	if err := os.RemoveAll(f.mail("aaa")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, a.MailPath("old@example.test")); err != nil {
+	if err := os.Symlink(target, f.mail("aaa")); err != nil {
 		t.Fatal(err)
 	}
-	a.cfg.Now = func() time.Time { return time.Now().AddDate(0, 0, 31) }
-	if _, err := a.PurgeRemoved("t", false); err == nil {
-		t.Fatal("purge followed a symlink")
+	f.now = f.now.AddDate(0, 0, 31)
+
+	done, err := f.purge(false)
+	if err == nil || !strings.Contains(err.Error(), "aaa@example.test") {
+		t.Fatalf("error = %v, want one naming aaa@example.test", err)
 	}
-	if _, err := os.Stat(target); err != nil {
-		t.Fatalf("symlink target removed: %v", err)
+	if want := []string{"purged mail of zzz@example.test, removed 2026-11-01"}; !slices.Equal(done, want) {
+		t.Errorf("a bad entry blocked the rest: purged %q, want %q", done, want)
+	}
+	if !exists(t, target) || !exists(t, f.index("aaa")) {
+		t.Error("purge followed a symlink or deleted part of a refused mailbox")
+	}
+}
+
+func TestPurgeRemovedRefusesSymlinkedDomain(t *testing.T) {
+	f := newPurgeFixture(t)
+	f.removed("old")
+	elsewhere := t.TempDir()
+	f.mkdir(filepath.Join(elsewhere, "old"))
+	domain := filepath.Join(f.a.cfg.MailRoot, "example.test")
+	if err := os.RemoveAll(domain); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, domain); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.AddDate(0, 0, 31)
+	if _, err := f.purge(false); err == nil {
+		t.Fatal("purge went through a symlinked domain directory")
+	}
+	if !exists(t, filepath.Join(elsewhere, "old")) {
+		t.Error("purge deleted through a symlinked domain directory")
+	}
+}
+
+func TestPurgeRemovedRefusesMismatchedStore(t *testing.T) {
+	f := newPurgeFixture(t)
+	f.removed("old")
+	f.now = f.now.AddDate(0, 0, 31)
+	users := filepath.Join(f.a.gens, "current", FileUsers)
+	if err := os.WriteFile(users, []byte("old@example.test:{BLF-CRYPT}x::::::\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.purge(false); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("error = %v, want the mismatch refusal", err)
+	}
+	if !exists(t, f.mail("old")) {
+		t.Error("purged from a store that does not match the files in use")
+	}
+}
+
+func TestPurgeRemovedNeedsAbsoluteRoots(t *testing.T) {
+	f := newPurgeFixture(t)
+	f.a.cfg.IndexRoot = ""
+	if _, err := f.purge(true); err == nil {
+		t.Fatal("ran with an empty index root")
 	}
 }

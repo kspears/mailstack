@@ -119,16 +119,20 @@ Removing a mailbox leaves its mail on disk, so a mistaken removal can be undone 
 `mailctl mailbox add <address> --adopt-existing-mail`, and the address cannot be given to
 someone else while the old mail is there. `mailctl mailbox purge-removed` deletes the mail and
 index directories of every mailbox removed more than 30 days ago that has not been added back,
-and records `mailbox.purge` in the change log. It only touches addresses whose removal is in
-the change log, never a directory that does not belong to one, nor a symlink. `--dry-run` lists
-what it would delete. Run it daily from the host:
+and records `mailbox.purge` in the change log. It only touches addresses whose latest removal
+is in the change log and not yet purged, so mail restored by hand after a purge stays. It
+refuses symlinks, and refuses to run at all when the store does not match the files in use.
+An address it cannot purge is reported and the rest still are. `--dry-run` lists what it
+would delete; run it once by hand before scheduling, since the first run also takes every
+older removal.
+
+Run it daily, after the backup, from a container with the mail root and the index root
+mounted read-write. Give it its own service rather than the web UI's: the UI needs neither
+read-write. In the reference stack the CLI `admin` service has both:
 
 ```
 docker compose run --rm -T admin mailbox purge-removed
 ```
-
-It needs the mail root and the index root mounted read-write; the web UI mounts neither
-read-write and cannot purge.
 
 ## Junk training
 
