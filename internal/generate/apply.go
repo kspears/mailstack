@@ -332,6 +332,28 @@ func (a *Admin) Watcher() WatcherState {
 	return w
 }
 
+// Verdict is one watcher/status line: "<id> ok", or "<id> error <message>".
+type Verdict struct {
+	ID       string
+	Rejected bool
+	Message  string // why it was rejected
+}
+
+// ParseVerdict reads a watcher/status line. ok is false for anything else.
+func ParseVerdict(line string) (v Verdict, ok bool) {
+	id, rest, _ := strings.Cut(line, " ")
+	word, msg, _ := strings.Cut(rest, " ")
+	switch {
+	case id == "":
+		return v, false
+	case rest == "ok":
+		return Verdict{ID: id}, true
+	case word == "error":
+		return Verdict{ID: id, Rejected: true, Message: strings.TrimSpace(msg)}, true
+	}
+	return v, false
+}
+
 // readWatcherStatus returns the first few KiB of watcher/status, trimmed, or "" if it
 // is missing or not a plain file. The internet-facing postfix container writes that
 // directory, so the file may be a symlink to a secret, a FIFO or an endless device;
@@ -389,16 +411,11 @@ func (a *Admin) deploy(files Files) (string, error) {
 func (a *Admin) wait(id string) error {
 	deadline := time.Now().Add(a.cfg.Timeout)
 	for {
-		if line := readWatcherStatus(filepath.Join(watcherDir(a.cfg), "status")); line != "" {
-			got, rest, _ := strings.Cut(line, " ")
-			if got == id {
-				if rest == "ok" {
-					return nil
-				}
-				if msg, isErr := strings.CutPrefix(rest, "error"); isErr {
-					return fmt.Errorf("postfix rejected generation %s: %s", id, strings.TrimSpace(msg))
-				}
+		if v, ok := ParseVerdict(readWatcherStatus(filepath.Join(watcherDir(a.cfg), "status"))); ok && v.ID == id {
+			if !v.Rejected {
+				return nil
 			}
+			return fmt.Errorf("postfix rejected generation %s: %s", id, v.Message)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out after %s waiting for the postfix watcher to accept generation %s; is it running?", a.cfg.Timeout, id)

@@ -58,13 +58,13 @@ func ScanMailbox(dir string) Mailbox {
 	return m
 }
 
-// Line is the mailbox's one-line summary for the Mailboxes list.
-func (m Mailbox) Line(now time.Time) string {
+// Delivery is the mailbox's last delivery as the Mailboxes list shows it.
+func (m Mailbox) Delivery(now time.Time) string {
 	switch {
 	case m.Err != nil:
 		return "Cannot read mail folder"
 	case m.Last.IsZero():
-		return "No mail yet · " + Size(m.Size)
+		return "No mail yet"
 	}
-	return "Last delivery " + Age(now.Sub(m.Last)) + " ago · " + Size(m.Size)
+	return Age(now.Sub(m.Last)) + " ago"
 }

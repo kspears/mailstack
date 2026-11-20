@@ -168,7 +168,7 @@ nothing:
 
 - the postfix watcher's heartbeat (red after 5 minutes of silence);
 - whether `generations/current` still matches the account store;
-- any pending change, and the watcher's last verdict;
+- any pending change, and a change postfix rejected, if the last one was;
 - the newest delivery to any mailbox's Inbox or Junk (yellow after 2 hours with no mail);
 - disk use of the mail and state filesystems (yellow at 80%, red at 90%).
 

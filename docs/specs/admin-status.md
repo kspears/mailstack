@@ -62,12 +62,10 @@ state, so nothing new goes in the change log.
    `This page checks postfix's watcher, the account files and disk space. It does not check
    dovecot, spam filtering or the outside world.`
 4. Below that is one card per check, in this order. Each card has a mark: green, yellow, red, or
-   neutral (no colour, information only). Each card shows a one-line value:
+   neutral (no colour, information only). Each card shows a short value:
    - **Postfix watcher**: `Last seen 12 s ago`.
-   - **Account files**: `In use: <generation id>`, plus `Matches the account store`.
+   - **Account files**: `In use: <generation id>`, plus `Matches the account store`. When `watcher/status` reports an error for a generation other than the one in use, a second line reads `Last change was rejected: <message>`.
    - **Pending change**: `None`, or `<generation id>, waiting <age>`.
-   - **Last watcher verdict**: the contents of `watcher/status`, for example
-     `20261117T120000.000000Z-1a2b3c4d ok`.
    - **Last mail in**: `<time> (<age> ago)`, the newest delivery across all mailboxes.
    - **Disk**: one card per distinct filesystem. If `MAILCTL_MAIL_ROOT` and `MAILCTL_STATE` are
      on the same filesystem, there is one card titled `Mail and state disk`. Otherwise there are
@@ -77,11 +75,16 @@ state, so nothing new goes in the change log.
 
 ### Mailboxes list
 
-1. The admin opens Mailboxes.
-2. Each mailbox row keeps its address, state and name, and adds a line:
-   `Last delivery <age> ago · <size>`, or `No mail yet · <size>` when the mailbox has no
-   delivered message.
-3. Tapping the row opens the existing edit page, as today.
+1. The admin opens Mailboxes. `Add a mailbox` is at the top, folded; it opens by itself when
+   there are no mailboxes yet.
+2. The mailboxes are a table: Address, Name, State, Last delivery (`<age> ago`, `No mail yet`
+   when the mailbox has no delivered message, or `Cannot read mail folder`), and Size. On a
+   phone each row folds to two lines: the address, then the other columns joined by ` · `.
+3. Tapping the address opens the existing edit page.
+
+Aliases use the same table (Alias, Delivers to) with `Add an alias` folded at the top. On a wide
+screen, pages are up to 64rem wide and the Status cards tile into columns; forms and single cards
+stay 40rem wide. The signed-in address and `Sign out` sit together at the end of the nav.
 
 ### Phone use
 
@@ -110,15 +113,16 @@ ids, watcher error lines with paths) wraps rather than widening the page.
 | Postfix watcher | mtime of `<state>/watcher/heartbeat` | updated within the last 5 minutes | `MAILCTL_WATCHER=off`: `Watcher is off` | file missing: `Postfix watcher has not reported yet` | older than 5 minutes: `Postfix watcher last seen <age> ago` |
 | Account files | `generations/current` compared with what the store renders (below) | match | `current` missing: `No account files yet`. Change lock busy: `A change is being applied` | | no match, or `current` unreadable: `The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"` |
 | Pending change | `generations/pending` symlink; age is the `Lstat` mtime of the link | absent: `None` | present and not older than `MAILCTL_APPLY_TIMEOUT`: `<generation id>, waiting <age>`. `MAILCTL_WATCHER=off`: `Watcher is off` | present and older than `MAILCTL_APPLY_TIMEOUT`: card `<generation id>, waiting <age>`, reason `A change has been pending for <age>` | |
-| Last watcher verdict | `<state>/watcher/status` | | always. Missing file: `No verdict yet` | | |
 | Last mail in | newest last delivery across all mailboxes (below) | newest delivery within the last 2 hours | no delivery in any mailbox: `No mail yet` | newest delivery 2 hours ago or older: `No mail received for <age>`. One or more mailboxes could not be read: `<n> mailboxes could not be read` | |
 | Disk | `syscall.Statfs` on `MAILCTL_MAIL_ROOT` and on `MAILCTL_STATE` | under 80% used | | 80% to under 90%: `<card title> is <percent>% full` | 90% or more: `<card title> is <percent>% full`. `Statfs` fails: `Cannot read <card title>: <reason>` |
 
 The overall verdict is the worst of the green, yellow and red marks. Neutral marks never change it.
 If all marks are green or neutral, the verdict is `No problems found`.
 
-"Last watcher verdict" can name an older failed generation after a change that rolled back. That
-is history, not a fault, so it is always neutral.
+A rejected change shows on the Account files card, not on a card of its own: on a healthy server
+the watcher's last verdict names the generation in use, so a separate card only repeated it. The
+rejection is history, since mailctl rolled the change back and reported it then, so it never
+changes the card's mark.
 
 **Account files check.** Today the comparison is `requireCurrentMatches` in
 `internal/generate/apply.go`. It is unexported, and it runs inside a change, under the change lock.
@@ -159,7 +163,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
   on disk. Mail is stored encrypted and compressed (`mail_crypt`), so this is not the message size.
   It is rendered in binary units with one decimal place (`512 B`, `1.5 KiB`, `3.2 MiB`, `1.1 GiB`).
 - A mailbox whose directory does not exist, or whose mail root does not exist, shows
-  `No mail yet · 0 B`. That is not an error.
+  `No mail yet` and `0 B`. That is not an error.
 - A mailbox whose directory exists but cannot be fully read shows `Cannot read mail folder` in place
   of its line. It also counts toward the `<n> mailboxes could not be read` note on the Status page.
 - **Last mail in** on the Status page is the newest last delivery across all readable mailboxes, or
@@ -192,7 +196,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
 
   Redirects back to `/mailboxes` after a mailbox change stay as they are.
 - The nav in `layout.html` gains `Status` as its first link, with `aria-current="page"` when active.
-- `mailboxes.html` gains the last-delivery and size line.
+- `mailboxes.html` becomes a table with last-delivery and size columns.
 - The Status page loads no script. It gets the default CSP (`default-src 'none'`, as `/mailboxes`
   does), and no new CSP exceptions.
 
@@ -208,7 +212,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
 - **Watcher off** (`MAILCTL_WATCHER=off`, as in `just dev` and the CI bootstrap): the watcher and
   pending cards are neutral, `Watcher is off`. The page can still show `No problems found`.
 - **Fresh install** (no `current`, no mail, no `watcher/status`): Account files `No account files yet`,
-  Last watcher verdict `No verdict yet`, Last mail in `No mail yet`. All neutral, and nothing turns
+  Last mail in `No mail yet`. All neutral, and nothing turns
   red because of the fresh install alone.
 - **Clock skew:** the heartbeat age is the UI's clock minus the file's mtime. If that comes out
   negative, the age is treated as 0 (`0 s ago`).
@@ -261,7 +265,7 @@ when their `Stat` device ids match. The code must build on both linux (productio
       `alice@example.test` holds a file, checked directly with `ls` in the dovecot container. This
       proves the real Junk folder path; alice's Mailboxes row alone does not, since she also gets
       Inbox mail;
-    - the Mailboxes page shows a `Last delivery` line for `alice@example.test`.
+    - the Mailboxes page shows a last delivery (`<age> ago`) in `alice@example.test`'s row.
 - `just check` passes.
 
 ## Acceptance criteria
@@ -291,10 +295,10 @@ criterion 16 by a person.
 11. Given a filesystem at 79.9%, 80.0% and 90.0% used (from an injected disk reader), the disk
     card is green, yellow and red respectively. At 89.9% it reads `89%` and is yellow.
 12. Given a mailbox with one file in the Junk folder's `new` and an older one in `Maildir/cur`, its
-    Mailboxes row shows `Last delivery <age> ago`, using the age of the Junk file.
+    Mailboxes row shows `<age> ago`, using the age of the Junk file.
 13. Given a mailbox whose only file is in `Maildir/.Sent/cur`, its row shows
-    `No mail yet · <size>`, with a non-zero size. Given a mailbox with no directory, its row shows
-    `No mail yet · 0 B`.
+    `No mail yet` and a non-zero size. Given a mailbox with no directory, its row shows
+    `No mail yet` and `0 B`.
 14. Given a newest delivery 1 h 59 min ago, the Last mail in card is green. At exactly 2 hours,
     it is yellow, and the reasons include `No mail received for 2 h`.
 15. Given all marks green or neutral, the verdict line reads `No problems found` and shows no reason lines.
@@ -306,7 +310,7 @@ criterion 16 by a person.
 17. The `/status` response carries the same `Content-Security-Policy` header as `/mailboxes`, and
     its HTML has no `<script>` element.
 18. `just check` passes, and `deploy/ci/test.sh` passes, including the new heartbeat, `/status`
-    and alice `Last delivery` checks.
+    and alice last-delivery checks.
 
 ## Decisions
 
@@ -360,10 +364,10 @@ criterion 16 by a person.
 | `internal/web/signin.go` | Extended: password sign-in redirects to `/status` |
 | `internal/web/templates/signin.html` | Extended: passkey `data-next` is `/status` |
 | `internal/web/templates/layout.html` | Extended: `Status` nav link |
-| `internal/web/templates/mailboxes.html` | Extended: last-delivery and size line |
+| `internal/web/templates/mailboxes.html` | Replaced: a table with last-delivery and size columns, add form folded at the top |
 | `internal/web/templates/status.html` | New |
 | `internal/web/static/style.css` | Extended: yellow and red tokens, wrapping for long text, phone-width fixes found while checking criterion 16 |
 | `internal/web/signin_test.go` | Extended: landing-page expectations move to `/status` |
-| `deploy/ci/test.sh` | Extended: heartbeat, `/status`, and alice `Last delivery` checks |
+| `deploy/ci/test.sh` | Extended: heartbeat, `/status`, and alice last-delivery checks |
 | `deploy/ci/compose.yaml` | Left alone |
 | `README.md` | Extended: `watcher/heartbeat` in the state layout, a short Status page section |

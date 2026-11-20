@@ -9,6 +9,8 @@ import (
 	"github.com/kspears/mailstack/internal/generate"
 )
 
+const mismatch = `The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`
+
 var testNow = time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 func okDisk(used, avail, dev uint64) DiskInput {
@@ -48,7 +50,7 @@ func TestEvaluateHealthy(t *testing.T) {
 	for _, c := range r.Cards {
 		titles = append(titles, c.Title)
 	}
-	want := []string{"Postfix watcher", "Account files", "Pending change", "Last watcher verdict", "Last mail in", "Mail and state disk"}
+	want := []string{"Postfix watcher", "Account files", "Pending change", "Last mail in", "Mail and state disk"}
 	if !slices.Equal(titles, want) {
 		t.Fatalf("cards = %v, want %v", titles, want)
 	}
@@ -89,14 +91,14 @@ func TestCards(t *testing.T) {
 		{"files none", "Account files", func(in *Inputs) { in.Files = generate.FilesCheck{State: generate.FilesNone} }, Neutral, "No account files yet", ""},
 		{"files busy", "Account files", func(in *Inputs) { in.Files = generate.FilesCheck{State: generate.FilesBusy} }, Neutral, "A change is being applied", ""},
 		{"files mismatch", "Account files", func(in *Inputs) { in.Files.State = generate.FilesMismatch }, Red,
-			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`,
-			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`},
+			mismatch,
+			mismatch},
 		{"files mismatch with error", "Account files", func(in *Inputs) {
 			in.Files.State = generate.FilesMismatch
 			in.FilesErr = errors.New("boom")
 		}, Red,
 			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list": boom`,
-			`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`},
+			mismatch},
 		{"check error", "Account files", func(in *Inputs) {
 			in.Files = generate.FilesCheck{State: generate.FilesError}
 			in.FilesErr = errors.New("open lock: permission denied")
@@ -114,8 +116,21 @@ func TestCards(t *testing.T) {
 			in.Watcher.Pending, in.Watcher.PendingAt, in.WatcherOff = "g2", testNow.Add(-time.Hour), true
 		}, Neutral, "Watcher is off", ""},
 
-		{"no verdict", "Last watcher verdict", func(in *Inputs) {}, Neutral, "No verdict yet", ""},
-		{"verdict", "Last watcher verdict", func(in *Inputs) { in.Watcher.Status = "applied g1" }, Neutral, "applied g1", ""},
+		{"verdict ok for current", "Account files", func(in *Inputs) { in.Watcher.Status = "g1 ok" }, Green, "In use: g1 · Matches the account store", ""},
+		{"verdict error for current", "Account files", func(in *Inputs) { in.Watcher.Status = "g1 error odd" }, Green, "In use: g1 · Matches the account store", ""},
+		{"rejected change", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 error postfix check: bad map" }, Green,
+			"In use: g1 · Matches the account store\nLast change was rejected: postfix check: bad map", ""},
+		{"not an error word", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 errors here" }, Green, "In use: g1 · Matches the account store", ""},
+		{"rejected change, watcher off", "Account files", func(in *Inputs) {
+			in.Watcher.Status, in.WatcherOff = "g2 error stale", true
+		}, Green, "In use: g1 · Matches the account store", ""},
+		{"rejected change, no reason", "Account files", func(in *Inputs) { in.Watcher.Status = "g2 error" }, Green,
+			"In use: g1 · Matches the account store\nLast change was rejected: no reason given", ""},
+		{"rejected change beside a mismatch", "Account files", func(in *Inputs) {
+			in.Files.State = generate.FilesMismatch
+			in.Watcher.Status = "g2 error boom"
+		}, Red, mismatch + "\nLast change was rejected: boom",
+			mismatch},
 
 		{"mail at 2h-1s", "Last mail in", func(in *Inputs) {
 			in.Boxes = map[string]Mailbox{"a": {Last: testNow.Add(-2*time.Hour + time.Second)}}
@@ -162,8 +177,12 @@ func TestCards(t *testing.T) {
 			tt.mod(&in)
 			r := Evaluate(in)
 			c := card(t, r, tt.title)
-			if c.Mark != tt.mark || c.Value != tt.value {
-				t.Errorf("card = {%v %q}, want {%v %q}", c.Mark, c.Value, tt.mark, tt.value)
+			got := c.Value // a note is written as a second line of the expected value
+			if c.Note != "" {
+				got += "\n" + c.Note
+			}
+			if c.Mark != tt.mark || got != tt.value {
+				t.Errorf("card = {%v %q}, want {%v %q}", c.Mark, got, tt.mark, tt.value)
 			}
 			if tt.reason == "" {
 				return
@@ -223,7 +242,7 @@ func TestVerdictAndReasonOrder(t *testing.T) {
 		t.Fatalf("verdict = %v %q", r.Verdict, r.Headline)
 	}
 	want := []string{
-		`The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`,
+		mismatch,
 		"Mail and state disk is 95% full",
 		"Postfix watcher has not reported yet",
 		"No mail received for 3 h",

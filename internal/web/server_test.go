@@ -289,7 +289,7 @@ func TestAliasLifecycle(t *testing.T) {
 	if a := u.snapshot().Aliases; len(a) != 1 || a[0].Address != "info@example.test" {
 		t.Fatalf("aliases = %+v", a)
 	}
-	if !strings.Contains(r.body, "delivers to alice@example.test") {
+	if !strings.Contains(r.body, "info@example.test</a></td><td class=\"wrap\">alice@example.test,​ bob@example.test</td>") {
 		t.Errorf("alias list lacks targets:\n%s", r.body)
 	}
 	if e := u.get("/aliases/edit?address=info@example.test"); !strings.Contains(e.body, `value="alice@example.test, bob@example.test"`) {
@@ -521,7 +521,7 @@ func TestStatusPage(t *testing.T) {
 		t.Fatalf("status page: %d\n%s", r.code, r.body)
 	}
 	for _, want := range []string{`<a href="/status" aria-current="page">Status</a>`, "Postfix watcher", "Watcher is off",
-		"Account files", "Matches the account store", "Pending change", "No verdict yet", "Last mail in", "No mail yet",
+		"Account files", "Matches the account store", "Pending change", "Last mail in", "No mail yet",
 		"It does not check dovecot", "Checked at ", "Mail scanned at "} {
 		if !strings.Contains(html.UnescapeString(r.body), want) {
 			t.Errorf("status page lacks %q:\n%s", want, r.body)
@@ -541,13 +541,14 @@ func TestStatusPageDoesNotFollowWatcherStatusLink(t *testing.T) {
 	u := newUI(t)
 	state := u.admin.Config().State
 	secret := filepath.Join(state, "secret")
-	if err := os.WriteFile(secret, []byte("do-not-show-this"), 0o600); err != nil {
+	// Shaped like a rejected change, so it would be shown if it were read.
+	if err := os.WriteFile(secret, []byte("g9 error do-not-show-this"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(secret, filepath.Join(state, "watcher", "status")); err != nil {
 		t.Fatal(err)
 	}
-	if body := u.get("/status").body; strings.Contains(body, "do-not-show-this") || !strings.Contains(body, "No verdict yet") {
+	if body := u.get("/status").body; strings.Contains(body, "do-not-show-this") || strings.Contains(body, "Last change was rejected") {
 		t.Errorf("watcher/status was followed through a symlink:\n%s", body)
 	}
 }
@@ -577,11 +578,28 @@ func TestMailboxesShowLastDelivery(t *testing.T) {
 		}
 	}
 	body := html.UnescapeString(u.get("/mailboxes").body)
-	if !regexpMatch(`alice@example\.test</b><small>[^<]*</small><small>Last delivery 3 min ago · [0-9.]+ KiB</small>`, body) {
+	if !regexpMatch(`alice@example\.test</a></td><td>Alice A</td><td>active</td><td>3 min ago</td><td>[0-9.]+ KiB</td>`, body) {
 		t.Errorf("alice's row lacks her last delivery:\n%s", body)
 	}
-	if !strings.Contains(body, "bob@example.test</b><small>active</small><small>No mail yet · 0 B</small>") {
+	if !strings.Contains(body, "bob@example.test</a></td><td></td><td>active</td><td>No mail yet</td><td>0 B</td>") {
 		t.Errorf("bob's row:\n%s", body)
+	}
+	// The add form comes before the list, so a long list does not push it out of reach.
+	if i := strings.Index(body, "<summary>Add a mailbox</summary>"); i < 0 || i > strings.Index(body, "alice@example.test") {
+		t.Error("the add form is missing or below the mailbox list")
+	}
+	// Folded while there are mailboxes; open when the list is empty or an add just failed.
+	if strings.Contains(body, `<details class="card add" open>`) {
+		t.Error("the add form is open above a non-empty list")
+	}
+}
+
+func TestAddFormOpensAboveAnEmptyList(t *testing.T) {
+	u := newUI(t)
+	for _, p := range []string{"/mailboxes", "/aliases"} {
+		if body := u.get(p).body; !strings.Contains(body, `<details class="card add" open>`) {
+			t.Errorf("%s: the add form is folded above an empty list:\n%s", p, body)
+		}
 	}
 }
 

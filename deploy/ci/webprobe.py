@@ -123,8 +123,8 @@ def main(token):
     status, _, page, _ = b.request("GET", f"https://{ADMIN}/mailboxes")
     if status != 200 or "alice@example.test" not in page:
         fail(f"signed-in /mailboxes: {status}")
-    row = page[page.index("alice@example.test"):].split("</a>", 1)[0]
-    if "Last delivery" not in row:
+    row = page[page.index("alice@example.test"):].split("</tr>", 1)[0]
+    if " ago</td>" not in row:
         fail(f"alice's mailbox row shows no delivery: {row}")
     print("ok: enrolled through the link and signed in, through the proxy")
 

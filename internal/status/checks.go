@@ -28,6 +28,7 @@ type Card struct {
 	Title string
 	Mark  Mark
 	Value string
+	Note  string // a second, quieter line; empty for most cards
 }
 
 type Report struct {
@@ -67,12 +68,10 @@ type check struct {
 
 // Evaluate turns the gathered inputs into the cards, verdict and reasons.
 func Evaluate(in Inputs) Report {
-	verdict := cmp.Or(in.Watcher.Status, "No verdict yet")
 	checks := []check{
 		watcherCheck(in),
 		filesCheck(in),
 		pendingCheck(in),
-		{Card: Card{"Last watcher verdict", Neutral, verdict}},
 		mailCheck(in),
 	}
 	checks = append(checks, diskChecks(in)...)
@@ -100,14 +99,14 @@ func Evaluate(in Inputs) Report {
 }
 
 func problem(title string, m Mark, value string) check {
-	return check{Card{title, m, value}, []string{value}}
+	return check{Card{title, m, value, ""}, []string{value}}
 }
 
 func watcherCheck(in Inputs) check {
 	const title = "Postfix watcher"
 	switch {
 	case in.WatcherOff:
-		return check{Card: Card{title, Neutral, "Watcher is off"}}
+		return check{Card: Card{title, Neutral, "Watcher is off", ""}}
 	case in.Watcher.HeartbeatErr != nil:
 		return problem(title, Red, fmt.Sprintf("Cannot read the watcher heartbeat: %v", in.Watcher.HeartbeatErr))
 	case in.Watcher.Heartbeat.IsZero():
@@ -117,43 +116,67 @@ func watcherCheck(in Inputs) check {
 	if age > heartbeatMax {
 		return problem(title, Red, "Postfix watcher last seen "+Age(age)+" ago")
 	}
-	return check{Card: Card{title, Green, "Last seen " + Age(age) + " ago"}}
+	return check{Card: Card{title, Green, "Last seen " + Age(age) + " ago", ""}}
 }
 
+// filesCheck also carries the watcher's last verdict when it rejected a change. That
+// is history, since mailctl rolled the change back and reported it then, so it adds a
+// line without changing the mark.
 func filesCheck(in Inputs) check {
+	c := filesState(in)
+	if in.WatcherOff {
+		return c // a verdict left from before the watcher was turned off is stale
+	}
+	if msg := rejected(in.Watcher.Status, in.Files.Current); msg != "" {
+		c.Note = "Last change was rejected: " + msg
+	}
+	return c
+}
+
+// rejected returns the watcher's message when its last verdict was an error about a
+// generation other than the one in use.
+func rejected(status, current string) string {
+	v, ok := generate.ParseVerdict(status)
+	if !ok || !v.Rejected || v.ID == current {
+		return ""
+	}
+	return cmp.Or(v.Message, "no reason given")
+}
+
+func filesState(in Inputs) check {
 	const title = "Account files"
 	switch in.Files.State {
 	case generate.FilesError:
 		return problem(title, Red, fmt.Sprintf("Cannot check the account files: %v", in.FilesErr))
 	case generate.FilesNone:
-		return check{Card: Card{title, Neutral, "No account files yet"}}
+		return check{Card: Card{title, Neutral, "No account files yet", ""}}
 	case generate.FilesBusy:
-		return check{Card: Card{title, Neutral, "A change is being applied"}}
+		return check{Card: Card{title, Neutral, "A change is being applied", ""}}
 	case generate.FilesMismatch:
 		reason := `The files in use do not match the account store; run "mailctl apply" after checking "mailctl mailbox list"`
 		value := reason
 		if in.FilesErr != nil {
 			value += fmt.Sprintf(": %v", in.FilesErr)
 		}
-		return check{Card{title, Red, value}, []string{reason}}
+		return check{Card{title, Red, value, ""}, []string{reason}}
 	}
-	return check{Card: Card{title, Green, "In use: " + in.Files.Current + " · Matches the account store"}}
+	return check{Card: Card{title, Green, "In use: " + in.Files.Current + " · Matches the account store", ""}}
 }
 
 func pendingCheck(in Inputs) check {
 	const title = "Pending change"
 	switch {
 	case in.WatcherOff:
-		return check{Card: Card{title, Neutral, "Watcher is off"}}
+		return check{Card: Card{title, Neutral, "Watcher is off", ""}}
 	case in.Watcher.Pending == "":
-		return check{Card: Card{title, Green, "None"}}
+		return check{Card: Card{title, Green, "None", ""}}
 	}
 	age := in.Now.Sub(in.Watcher.PendingAt)
 	value := fmt.Sprintf("%s, waiting %s", in.Watcher.Pending, Age(age))
 	if age > in.Timeout {
-		return check{Card{title, Yellow, value}, []string{"A change has been pending for " + Age(age)}}
+		return check{Card{title, Yellow, value, ""}, []string{"A change has been pending for " + Age(age)}}
 	}
-	return check{Card: Card{title, Neutral, value}}
+	return check{Card: Card{title, Neutral, value, ""}}
 }
 
 func mailCheck(in Inputs) check {
@@ -170,7 +193,7 @@ func mailCheck(in Inputs) check {
 		}
 	}
 
-	c := check{Card: Card{title, Neutral, "No mail yet"}}
+	c := check{Card: Card{title, Neutral, "No mail yet", ""}}
 	if !newest.IsZero() {
 		age := in.Now.Sub(newest)
 		c.Mark, c.Value = Green, fmt.Sprintf("%s (%s ago)", Stamp(newest), Age(age))
@@ -204,7 +227,7 @@ func diskCheck(title string, in DiskInput) check {
 	}
 	p := in.Disk.Percent()
 	shown := int(math.Floor(p))
-	c := check{Card: Card{title, Green, fmt.Sprintf("%s of %s used (%d%%)", Size(int64(in.Disk.Used)), Size(int64(in.Disk.Total)), shown)}}
+	c := check{Card: Card{title, Green, fmt.Sprintf("%s of %s used (%d%%)", Size(int64(in.Disk.Used)), Size(int64(in.Disk.Total)), shown), ""}}
 	switch {
 	case p >= 90:
 		c.Mark = Red

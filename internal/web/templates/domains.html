@@ -1,4 +1,4 @@
 {{define "domains"}}{{template "head" .}}
-{{range .Data}}<p class="card">{{.}}</p>{{else}}<p>No domains.</p>{{end}}
+{{if .Data}}<div class="grid">{{range .Data}}<p class="card">{{.}}</p>{{end}}</div>{{else}}<p>No domains.</p>{{end}}
 <p>Domains are added from the command line (<code>mailctl domain add</code>), because a new domain also needs DNS records and an SES identity.</p>
 {{template "foot" .}}{{end}}

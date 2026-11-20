@@ -3,6 +3,8 @@
 {{if .Reasons}}<ul>{{range .Reasons}}<li>{{.}}</li>{{end}}</ul>
 {{end}}</section>
 <p class="note">This page checks postfix's watcher, the account files and disk space. It does not check dovecot, spam filtering or the outside world.</p>
-{{range .Cards}}<div class="card check {{.Mark.Class}}"><small>{{.Title}}</small><span>{{.Value}}</span></div>
-{{end}}<p class="note">Checked at {{.Checked}}<br>Mail scanned at {{.Scanned}}</p>
+<div class="grid">
+{{range .Cards}}<div class="card check {{.Mark.Class}}"><small>{{.Title}}</small><span>{{.Value}}</span>{{with .Note}}<span>{{.}}</span>{{end}}</div>
+{{end}}</div>
+<p class="note">Checked at {{.Checked}}<br>Mail scanned at {{.Scanned}}</p>
 {{end}}{{template "foot" .}}{{end}}
