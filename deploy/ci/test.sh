@@ -160,5 +160,15 @@ case "$ui_log" in
 	*) echo "FAIL: no failed sign-in logged with the visitor's address"; exit 1 ;;
 esac
 case "$ui_log" in *"${link#*t=}"*) echo "FAIL: the UI logged the enrolment token"; exit 1 ;; esac
+# webprobe.py signed in with a 20 KiB address. Its log line must have been cut to mailctl's
+# 1 KiB cap, so journald on a real host has nothing over 16 KiB to split.
+if printf '%s\n' "$ui_log" | awk 'length($0) > 2048 { found = 1 } END { exit !found }'; then
+	echo "FAIL: the UI logged a line longer than its cap"; exit 1
+fi
+case "$ui_log" in
+	*'address="xxxx'*'[truncated]'*) echo "ok: a sign-in with a long address is logged cut short" ;;
+	*) echo "FAIL: the sign-in with a long address was not logged"; exit 1 ;;
+esac
+case "$ui_log" in *198.51.100.9*) echo "FAIL: the forged address reached the log"; exit 1 ;; esac
 
 printf '\nall checks passed\n'

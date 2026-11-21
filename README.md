@@ -235,9 +235,18 @@ What the sign-in does and does not do:
   filter must anchor on that: the timestamp, then those words, at the start of the line,
   as in `^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d (?:sign-in|proof) failed from=<HOST> `. Request
   lines quote the path, so a visitor cannot make one read as a failure from someone else's
-  address, but an unanchored filter would still be matching text the visitor chose.
+  address, but an unanchored filter would still be matching text the visitor chose. Every
+  line is cut to 1 KiB, well under the 16 KiB at which Docker's journald driver splits a
+  line into separate entries, the second of which would start with text the visitor chose.
 - Every refused sign-in takes at least 750 ms, so the time taken does not say which check
   refused it.
+- Passwords are checked one at a time. bcrypt is the costly step anyone can trigger without
+  an account, and this leaves the host's other CPU to mail during a flood. A password
+  sign-in or proof that waits more than 2 seconds for its turn, or whose visitor goes away
+  while waiting, is refused with `Too many sign-ins at once.` and logged as a failure
+  (`sign-in failed from=<address> busy: ...`), so the ban counts it: a source flooding the
+  form is banned like one guessing passwords. While a flood lasts, password sign-in may be
+  refused for everyone; passkey sign-in does no bcrypt and is never held up.
 - A session lasts 12 hours and is kept on the server, so signing out, a reset and a removal
   end it at once. Changing the password, replacing the authenticator or removing a passkey
   ends the admin's other sessions.
