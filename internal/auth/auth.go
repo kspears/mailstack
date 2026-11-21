@@ -104,8 +104,7 @@ type Service struct {
 	codes sync.Mutex
 
 	// checking holds one token per password comparison in progress; see compare.
-	checking  chan struct{}
-	checkWait time.Duration
+	checking chan struct{}
 
 	mu         sync.Mutex
 	ceremonies map[string]ceremony
@@ -140,7 +139,7 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{st: st, cfg: cfg, wa: wa, fake: fake, checking: make(chan struct{}, checkSlots), checkWait: checkWait,
+	return &Service{st: st, cfg: cfg, wa: wa, fake: fake, checking: make(chan struct{}, checkSlots),
 		ceremonies: map[string]ceremony{}, pending: map[string]pendingSecret{}}, nil
 }
 
@@ -159,19 +158,30 @@ func newToken() (token string, hash []byte) {
 // chosen by the visitor: none of them may start a line of its own.
 func SingleLine(logf func(format string, args ...any)) func(format string, args ...any) {
 	const cut = " [truncated]"
+	// runeCut returns the longest prefix of line of at most n bytes that ends on a rune boundary.
+	runeCut := func(line string, n int) string {
+		if len(line) <= n {
+			return line
+		}
+		for n > 0 && !utf8.RuneStart(line[n]) {
+			n--
+		}
+		return line[:n]
+	}
 	return func(format string, args ...any) {
-		line := strings.Map(func(r rune) rune {
+		// Cut before mapping: a failed sign-in can carry a 64 KiB address, and
+		// mapping all of it only to discard most would copy it for nothing.
+		line := fmt.Sprintf(format, args...)
+		truncated := len(line) > maxLogLine
+		line = strings.Map(func(r rune) rune {
 			if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 				return ' '
 			}
 			return r
-		}, fmt.Sprintf(format, args...))
-		if len(line) > maxLogLine {
-			n := maxLogLine - len(cut)
-			for n > 0 && !utf8.RuneStart(line[n]) {
-				n--
-			}
-			line = line[:n] + cut
+		}, runeCut(line, maxLogLine))
+		// Invalid bytes map to a three-byte U+FFFD, so the mapped line can outgrow the cap.
+		if truncated || len(line) > maxLogLine {
+			line = runeCut(line, maxLogLine-len(cut)) + cut
 		}
 		logf("%s", line)
 	}
@@ -458,12 +468,10 @@ func (s *Service) passwordAndCode(ctx context.Context, from, what, address, pass
 // the comparison ran at all. The slot is freed as soon as the comparison is
 // done, before any failure delay, so slow refusals cannot hold it.
 func (s *Service) compare(ctx context.Context, hash []byte, password string) (match, ran bool) {
-	t := time.NewTimer(s.checkWait)
-	defer t.Stop()
+	ctx, cancel := context.WithTimeout(ctx, checkWait)
+	defer cancel()
 	select {
 	case s.checking <- struct{}{}:
-	case <-t.C:
-		return false, false
 	case <-ctx.Done():
 		return false, false
 	}

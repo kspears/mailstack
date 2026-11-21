@@ -179,7 +179,7 @@ func (s *server) startSession(w http.ResponseWriter, token string) {
 
 func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 	token, err := s.auth.SignIn(r.Context(), s.from(r), r.PostFormValue("address"), r.PostFormValue("password"), r.PostFormValue("code"))
-	if errors.Is(err, auth.ErrSignIn) || errors.Is(err, auth.ErrBusy) {
+	if isShowable(err) {
 		s.signInFailed(w, r, err)
 		return
 	}
@@ -204,11 +204,17 @@ func (s *server) signOut(w http.ResponseWriter, r *http.Request) {
 
 // --- passkeys ----------------------------------------------------------------
 
+// isShowable reports whether err is a mistake the visitor can correct, which
+// is the only kind of error described to them.
+func isShowable(err error) bool {
+	var problem auth.Problem
+	return errors.As(err, &problem) || errors.Is(err, auth.ErrSignIn)
+}
+
 // showable is what to tell the visitor about err. Only a mistake they can
 // correct is described; a fault is logged here and shown as nothing more.
 func (s *server) showable(what string, err error) string {
-	var problem auth.Problem
-	if errors.As(err, &problem) || errors.Is(err, auth.ErrSignIn) {
+	if isShowable(err) {
 		return err.Error()
 	}
 	s.logf("%q: %v", what, err)

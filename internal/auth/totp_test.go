@@ -67,12 +67,22 @@ func TestSingleLineCapsTheLength(t *testing.T) {
 	}
 }
 
+func TestSingleLineCapsInvalidBytesThatGrow(t *testing.T) {
+	var lines []string
+	logf := SingleLine(func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) })
+	// Each invalid byte becomes a three-byte U+FFFD, so 1000 bytes map to 3000.
+	logf("%s", strings.Repeat("\xff", 1000))
+	if len(lines) != 1 || len(lines[0]) > maxLogLine || !utf8.ValidString(lines[0]) || !strings.HasSuffix(lines[0], " [truncated]") {
+		t.Errorf("got %d lines, first %d bytes", len(lines), len(lines[0]))
+	}
+}
+
 func TestPasswordChecksWaitForASlot(t *testing.T) {
 	hash, err := bcrypt.GenerateFromPassword([]byte("right"), bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Service{checking: make(chan struct{}, 1), checkWait: 50 * time.Millisecond}
+	s := &Service{checking: make(chan struct{}, 1)}
 	ctx := context.Background()
 	if match, ran := s.compare(ctx, hash, "right"); !match || !ran {
 		t.Fatalf("a free slot: match %v, ran %v", match, ran)
@@ -81,13 +91,15 @@ func TestPasswordChecksWaitForASlot(t *testing.T) {
 		t.Fatal("the slot was not freed after the comparison")
 	}
 	s.checking <- struct{}{}
-	if _, ran := s.compare(ctx, hash, "right"); ran {
+	short, stop := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer stop()
+	if _, ran := s.compare(short, hash, "right"); ran {
 		t.Fatal("a comparison ran while the only slot was taken")
 	}
 	gone, cancel := context.WithCancel(ctx)
 	cancel()
 	started := time.Now()
-	if _, ran := s.compare(gone, hash, "right"); ran || time.Since(started) >= s.checkWait {
+	if _, ran := s.compare(gone, hash, "right"); ran || time.Since(started) >= checkWait/2 {
 		t.Errorf("a visitor who went away: ran %v after %v, want an immediate refusal", ran, time.Since(started))
 	}
 	go func() { time.Sleep(5 * time.Millisecond); <-s.checking }()
