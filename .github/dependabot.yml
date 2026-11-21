@@ -24,6 +24,19 @@ updates:
       base-images:
         update-types: [minor, patch]
 
+  # The third-party service images (caddy, dovecot, redis, rspamd), pinned in the CI
+  # stack so each bump runs the integration test. The live pins are in kspears/iac and are
+  # moved by hand once a bump here merges.
+  - package-ecosystem: docker-compose
+    directory: /deploy/ci
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      service-images:
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
