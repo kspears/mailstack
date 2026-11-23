@@ -15,8 +15,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/mailctl ./cmd/mailctl
 
 # Distroless publishes no version tags, so the digest is the pin. This variant runs as root
-# (not the :nonroot one) because the state and mail directories are root-owned volumes and
-# mailctl must write them and chown mailboxes to the mail user.
+# (not the :nonroot one) because the state directory is root-owned and mailctl must write
+# it. Mail belongs to the mail user, so reading or purging it also takes DAC_OVERRIDE.
 FROM gcr.io/distroless/static-debian13:latest@sha256:1a64f46364620465ef9e9a8f5413757dfdf22695e050bbfd7303eeaf17a59383
 COPY --from=build /out/mailctl /usr/local/bin/mailctl
 ENTRYPOINT ["mailctl"]
