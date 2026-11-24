@@ -108,7 +108,7 @@ store is created as usual.
 | `MAILCTL_INDEX_ROOT` | `/var/vmail_index` | dovecot's indexes, `<root>/<address>`; written only by `mailbox purge-removed` |
 | `MAILCTL_APPLY_TIMEOUT` | `30s` | how long to wait for the watcher's `status` |
 | `MAILCTL_WATCHER` | unset | `off` skips the wait (tests, first bootstrap) |
-| `MAILCTL_DOVECOT_UID` | `999` | owner of `dovecot/users`, which is mode 0400 so only dovecot's auth process (and root) can read the hashes; the default is the `dovecot` user in the dovecot/dovecot image. Giving the file away needs the `CHOWN` capability, so every container that runs a changing command needs it |
+| `MAILCTL_DOVECOT_UID` | `999` | owner of `dovecot/users` (mode 0400), the `dovecot` user in the dovecot/dovecot image; see `Config.DovecotUID`. Needs the `CHOWN` capability wherever mailctl makes changes |
 
 The change log names the operator from `SUDO_USER`, then `USER`. A host wrapper that runs
 `docker compose run admin ...` must pass it in (`-e SUDO_USER`), or every CLI change is

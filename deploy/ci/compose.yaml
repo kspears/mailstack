@@ -173,8 +173,8 @@ services:
       context: ../..
       dockerfile: images/admin/Dockerfile
     <<: *hardened
-    # CHOWN: every change gives dovecot/users to dovecot's user (MAILCTL_DOVECOT_UID).
-    # DAC_OVERRIDE: `mailbox purge-removed` deletes mail owned by uid 5000.
+    # CHOWN: mailctl gives dovecot/users to MAILCTL_DOVECOT_UID. DAC_OVERRIDE:
+    # `mailbox purge-removed` deletes mail owned by uid 5000.
     cap_add: [CHOWN, DAC_OVERRIDE]
     read_only: true
     # SQLite's spill files. Capped, so a full /tmp is an error rather than an OOM kill.
@@ -202,8 +202,8 @@ services:
     # Root, but the mail belongs to uid 5000: reading it for the Mailboxes page needs
     # DAC_OVERRIDE, and the mount is read-only, so it still cannot change it. Never
     # DAC_READ_SEARCH: Docker's seccomp profile then allows open_by_handle_at, which reaches
-    # any file on the filesystem that holds the volumes. CHOWN: every change gives
-    # dovecot/users to dovecot's user (MAILCTL_DOVECOT_UID).
+    # any file on the filesystem that holds the volumes. CHOWN: mailctl gives dovecot/users
+    # to MAILCTL_DOVECOT_UID.
     cap_add: [CHOWN, DAC_OVERRIDE]
     read_only: true
     tmpfs: ["/tmp:size=64m"]

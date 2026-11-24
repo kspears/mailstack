@@ -493,20 +493,17 @@ func (a *Admin) prune() {
 }
 
 // writeGeneration writes every file and makes the result durable: the files are
-// fsynced, then the directories that hold them. dovecot/users holds every password hash,
-// so it is 0400 and owned by dovecotUID (see Config); everything else is 0644.
+// fsynced, then the directories that hold them. dovecot/users is 0400 and owned by
+// dovecotUID (see Config.DovecotUID); everything else is 0644.
 func writeGeneration(dir string, files Files, dovecotUID int) error {
 	for _, name := range fileNames {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		mode, uid := os.FileMode(0o644), -1
+		mode, uid := os.FileMode(0o644), 0
 		if name == FileUsers {
-			mode = 0o400
-			if dovecotUID > 0 {
-				uid = dovecotUID
-			}
+			mode, uid = 0o400, dovecotUID
 		}
 		if err := writeSynced(path, files[name], mode, uid); err != nil {
 			return err
@@ -523,7 +520,7 @@ func writeGeneration(dir string, files Files, dovecotUID int) error {
 	return nil
 }
 
-// writeSynced writes content with mode and, unless uid is -1, that owner. The owner and
+// writeSynced writes content with mode and, if uid is not 0, that owner. The owner and
 // mode are set before the content is written, so the file is never readable more widely.
 func writeSynced(path, content string, mode os.FileMode, uid int) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -535,7 +532,7 @@ func writeSynced(path, content string, mode os.FileMode, uid int) error {
 		f.Close()
 		return err
 	}
-	if uid != -1 {
+	if uid != 0 {
 		if err := f.Chown(uid, -1); err != nil {
 			f.Close()
 			return fmt.Errorf("give %s to uid %d (the container needs the CHOWN capability): %w", path, uid, err)
