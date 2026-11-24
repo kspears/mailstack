@@ -214,8 +214,8 @@ func TestConfigNeedsAbsoluteRoots(t *testing.T) {
 	for _, env := range []map[string]string{
 		{"MAILCTL_MAIL_ROOT": "vmail"},
 		{"MAILCTL_INDEX_ROOT": "./index"},
-		{"MAILCTL_DOVECOT_GID": "0"},
-		{"MAILCTL_DOVECOT_GID": "dovecot"},
+		{"MAILCTL_DOVECOT_UID": "0"},
+		{"MAILCTL_DOVECOT_UID": "dovecot"},
 	} {
 		if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil {
 			t.Errorf("ConfigFromEnv accepted %v", env)
@@ -225,7 +225,7 @@ func TestConfigNeedsAbsoluteRoots(t *testing.T) {
 	if err != nil {
 		t.Errorf("defaults rejected: %v", err)
 	}
-	if cfg.DovecotGID != defaultDovecotGID {
-		t.Errorf("DovecotGID = %d, want %d", cfg.DovecotGID, defaultDovecotGID)
+	if cfg.DovecotUID != defaultDovecotUID {
+		t.Errorf("DovecotUID = %d, want %d", cfg.DovecotUID, defaultDovecotUID)
 	}
 }

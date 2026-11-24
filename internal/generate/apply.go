@@ -18,9 +18,9 @@ import (
 
 const keepGenerations = 10
 
-// defaultDovecotGID is the dovecot group in the dovecot/dovecot image, whose auth process
+// defaultDovecotUID is the dovecot user in the dovecot/dovecot image, whose auth process
 // reads dovecot/users.
-const defaultDovecotGID = 999
+const defaultDovecotUID = 999
 
 // Config is the on-disk layout and apply behaviour. See the README for the env vars.
 type Config struct {
@@ -28,10 +28,11 @@ type Config struct {
 	MailRoot   string
 	IndexRoot  string
 	WatcherOff bool
-	// DovecotGID owns dovecot/users, which is mode 0640: dovecot's auth process reads the
-	// hashes, and postfix, which also mounts the generations, cannot. 0 leaves the group as
-	// written.
-	DovecotGID int
+	// DovecotUID owns dovecot/users, which is mode 0400. Dovecot's auth process runs as that
+	// user and reads the hashes; its mail processes (uid 5000, though in the dovecot group)
+	// and postfix, which also mounts the generations, cannot. ConfigFromEnv always sets it;
+	// 0, for a Config built in a test, leaves the owner as written.
+	DovecotUID int
 	Timeout    time.Duration
 	Poll       time.Duration
 	Now        func() time.Time
@@ -44,7 +45,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		MailRoot:   cmp.Or(getenv("MAILCTL_MAIL_ROOT"), "/var/vmail"),
 		IndexRoot:  cmp.Or(getenv("MAILCTL_INDEX_ROOT"), "/var/vmail_index"),
 		WatcherOff: getenv("MAILCTL_WATCHER") == "off",
-		DovecotGID: defaultDovecotGID,
+		DovecotUID: defaultDovecotUID,
 		Timeout:    30 * time.Second,
 		Poll:       100 * time.Millisecond,
 		Now:        time.Now,
@@ -56,12 +57,12 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		}
 		cfg.Timeout = d
 	}
-	if s := getenv("MAILCTL_DOVECOT_GID"); s != "" {
-		gid, err := strconv.Atoi(s)
-		if err != nil || gid <= 0 {
-			return cfg, fmt.Errorf("MAILCTL_DOVECOT_GID=%q is not a positive group id such as 999", s)
+	if s := getenv("MAILCTL_DOVECOT_UID"); s != "" {
+		uid, err := strconv.Atoi(s)
+		if err != nil || uid <= 0 {
+			return cfg, fmt.Errorf("MAILCTL_DOVECOT_UID=%q is not a positive user id such as 999", s)
 		}
-		cfg.DovecotGID = gid
+		cfg.DovecotUID = uid
 	}
 	if !filepath.IsAbs(cfg.MailRoot) || !filepath.IsAbs(cfg.IndexRoot) {
 		return cfg, fmt.Errorf("MAILCTL_MAIL_ROOT=%q and MAILCTL_INDEX_ROOT=%q must be absolute paths", cfg.MailRoot, cfg.IndexRoot)
@@ -403,7 +404,7 @@ func readWatcherStatus(path string) string {
 func (a *Admin) deploy(files Files) (string, error) {
 	id := files.ID(a.cfg.Now())
 	tmp := filepath.Join(a.gens, ".tmp-"+id)
-	if err := writeGeneration(tmp, files, a.cfg.DovecotGID); err != nil {
+	if err := writeGeneration(tmp, files, a.cfg.DovecotUID); err != nil {
 		os.RemoveAll(tmp)
 		return "", err
 	}
@@ -493,21 +494,21 @@ func (a *Admin) prune() {
 
 // writeGeneration writes every file and makes the result durable: the files are
 // fsynced, then the directories that hold them. dovecot/users holds every password hash,
-// so it is 0640 and owned by dovecotGID (see Config); everything else is 0644.
-func writeGeneration(dir string, files Files, dovecotGID int) error {
+// so it is 0400 and owned by dovecotUID (see Config); everything else is 0644.
+func writeGeneration(dir string, files Files, dovecotUID int) error {
 	for _, name := range fileNames {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		mode, gid := os.FileMode(0o644), -1
+		mode, uid := os.FileMode(0o644), -1
 		if name == FileUsers {
-			mode = 0o640
-			if dovecotGID > 0 {
-				gid = dovecotGID
+			mode = 0o400
+			if dovecotUID > 0 {
+				uid = dovecotUID
 			}
 		}
-		if err := writeSynced(path, files[name], mode, gid); err != nil {
+		if err := writeSynced(path, files[name], mode, uid); err != nil {
 			return err
 		}
 	}
@@ -522,22 +523,23 @@ func writeGeneration(dir string, files Files, dovecotGID int) error {
 	return nil
 }
 
-// writeSynced writes content with mode and, unless gid is -1, that group. The group and
+// writeSynced writes content with mode and, unless uid is -1, that owner. The owner and
 // mode are set before the content is written, so the file is never readable more widely.
-func writeSynced(path, content string, mode os.FileMode, gid int) error {
+func writeSynced(path, content string, mode os.FileMode, uid int) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	if gid != -1 {
-		if err := f.Chown(-1, gid); err != nil {
-			f.Close()
-			return fmt.Errorf("set group %d on %s (the container needs CHOWN): %w", gid, path, err)
-		}
-	}
+	// Mode first: once the file is given away, changing its mode would need FOWNER too.
 	if err := f.Chmod(mode); err != nil {
 		f.Close()
 		return err
+	}
+	if uid != -1 {
+		if err := f.Chown(uid, -1); err != nil {
+			f.Close()
+			return fmt.Errorf("give %s to uid %d (the container needs the CHOWN capability): %w", path, uid, err)
+		}
 	}
 	if _, err := f.WriteString(content); err != nil {
 		f.Close()

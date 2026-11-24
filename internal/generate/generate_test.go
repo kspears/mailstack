@@ -416,25 +416,18 @@ func TestPrune(t *testing.T) {
 }
 
 func TestGeneratedFileModes(t *testing.T) {
-	// The last supplementary group is one the test may set but is not the primary one where
-	// the runner has several, so the group is proved to come from Config, not the creator.
-	groups, err := os.Getgroups()
-	if err != nil || len(groups) == 0 {
-		groups = []int{os.Getgid()}
-	}
-	gid := groups[len(groups)-1]
 	a := newAdmin(t, false)
-	a.cfg.DovecotGID = gid
+	// Only root may give a file away; giving it to its current owner is allowed for anyone.
+	a.cfg.DovecotUID = os.Getuid()
 	if _, err := a.AddDomain("t", "example.test"); err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range []struct {
 		name string
 		mode os.FileMode
-		gid  int
 	}{
-		{FileUsers, 0o640, gid},
-		{FileDomains, 0o644, -1},
+		{FileUsers, 0o400},
+		{FileDomains, 0o644},
 	} {
 		st, err := os.Stat(filepath.Join(a.gens, "current", f.name))
 		if err != nil {
@@ -442,9 +435,6 @@ func TestGeneratedFileModes(t *testing.T) {
 		}
 		if st.Mode().Perm() != f.mode {
 			t.Errorf("%s mode = %v, want %v", f.name, st.Mode().Perm(), f.mode)
-		}
-		if got := int(st.Sys().(*syscall.Stat_t).Gid); f.gid != -1 && got != f.gid {
-			t.Errorf("%s group = %d, want %d", f.name, got, f.gid)
 		}
 	}
 }

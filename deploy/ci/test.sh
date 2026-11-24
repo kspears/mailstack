@@ -126,19 +126,39 @@ docker compose exec -T dovecot sh -c '
 	if touch /data/mailstack/generations/probe 2>/dev/null; then echo "FAIL: dovecot can write generations"; exit 1; fi
 	echo "dovecot: generations read-only, nothing else"'
 
-step "only dovecot's group can read the password hashes; search and reindexing still work"
-# Every generation, including the bootstrap one: 0640, root, group 999 (dovecot in its image).
+step "only dovecot's auth process can read the password hashes; search and reindexing still work"
+users=/data/mailstack/generations/current/dovecot/users
+# Every generation, including the bootstrap one: 0400, owned by 999 (dovecot in its image).
 docker compose exec -T postfix sh -c '
-	bad=$(find /data/mailstack/generations -path "*/dovecot/users" ! \( -perm 0640 -user 0 -group 999 \))
+	all=$(find /data/mailstack/generations -path "*/dovecot/users" | wc -l)
+	bad=$(find /data/mailstack/generations -path "*/dovecot/users" ! \( -perm 0400 -user 999 -group 0 \))
+	[ "$all" -gt 0 ] || { echo "FAIL: no dovecot/users files found"; exit 1; }
 	[ -z "$bad" ] || { echo "FAIL: users files with the wrong owner or mode: $bad"; exit 1; }
-	echo "dovecot/users: 0640 root:999 in every generation"'
-# The postfix processes that face the internet run as postfix, which is not in that group.
-if docker compose exec -T -u postfix postfix cat /data/mailstack/generations/current/dovecot/users >/dev/null 2>&1; then
-	echo "FAIL: the postfix user can read the password hashes"; exit 1
-fi
-echo "postfix user: cannot read dovecot/users"
-# Logins above already prove dovecot's auth process reads the file. Mail processes and doveadm
-# never read it themselves: they ask the auth process for the user.
+	echo "dovecot/users: 0400 999:root in all $all generations"'
+# Each denial must be for permission, not because the user or file is missing: the same
+# process reads a world-readable file beside it first.
+denied() { # <label> <service> <command...>
+	local label=$1 svc=$2 out
+	shift 2
+	docker compose exec -T "$svc" "$@" cat /data/mailstack/generations/current/postfix/domains >/dev/null ||
+		{ echo "FAIL: $label cannot read even postfix/domains"; exit 1; }
+	if out=$(docker compose exec -T "$svc" "$@" cat "$users" 2>&1 >/dev/null); then
+		echo "FAIL: $label can read the password hashes"; exit 1
+	fi
+	case "$out" in
+		*"Permission denied"*) echo "$label: cannot read dovecot/users" ;;
+		*) echo "FAIL: $label failed to read dovecot/users for another reason: $out"; exit 1 ;;
+	esac
+}
+# The postfix processes that face the internet run as postfix.
+denied "postfix user" postfix setpriv --reuid=postfix --regid=postfix --init-groups
+# Dovecot's mail processes run as uid 5000 with dovecot's group added (mail_access_groups).
+denied "dovecot mail user" dovecot setpriv --reuid=5000 --regid=5000 --groups=999
+# Logins above prove the auth process reads the file, and that it does so as dovecot (999):
+auth_uid=$(docker compose exec -T dovecot sh -c 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = auth ] && awk "/^Uid:/ {print \$2}" "$p/status"; done; true' | sort -u)
+[ "$auth_uid" = 999 ] || { echo "FAIL: dovecot's auth process runs as uid '$auth_uid', not 999"; exit 1; }
+echo "dovecot auth: runs as uid 999"
+# Mail processes and doveadm never read the file: they ask the auth process for the user.
 hits=$(docker compose exec -T dovecot doveadm search -u alice@example.test mailbox INBOX subject "$subject")
 [ -n "$hits" ] || { echo "FAIL: doveadm search found nothing for $subject"; exit 1; }
 docker compose exec -T dovecot doveadm force-resync -u alice@example.test '*'
