@@ -87,7 +87,7 @@ func TestSelfCheck(t *testing.T) {
 			}
 			tc.mutate(f)
 			dir := t.TempDir()
-			if err := writeGeneration(dir, f); err != nil {
+			if err := writeGeneration(dir, f, 0); err != nil {
 				t.Fatal(err)
 			}
 			err := SelfCheck(dir, f)
@@ -104,7 +104,7 @@ func TestSelfCheck(t *testing.T) {
 func TestSelfCheckRoundTrip(t *testing.T) {
 	want := Render(fixture())
 	dir := t.TempDir()
-	if err := writeGeneration(dir, want); err != nil {
+	if err := writeGeneration(dir, want, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := SelfCheck(dir, want); err != nil {
@@ -403,6 +403,40 @@ func TestPrune(t *testing.T) {
 		t.Errorf("%d generations kept, want %d", dirs, keepGenerations)
 	}
 
+	failed := filepath.Join(a.gens, ".tmp-failed")
+	if err := os.MkdirAll(filepath.Join(failed, "dovecot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Apply("t", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(failed); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("failed generation left behind: %v", err)
+	}
+}
+
+func TestGeneratedFileModes(t *testing.T) {
+	a := newAdmin(t, false)
+	// Only root may give a file away; giving it to its current owner is allowed for anyone.
+	a.cfg.DovecotUID = os.Getuid()
+	if _, err := a.AddDomain("t", "example.test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{FileUsers, 0o400},
+		{FileDomains, 0o644},
+	} {
+		st, err := os.Stat(filepath.Join(a.gens, "current", f.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != f.mode {
+			t.Errorf("%s mode = %v, want %v", f.name, st.Mode().Perm(), f.mode)
+		}
+	}
 }
 
 func tamperCurrent(t *testing.T, a *Admin) {

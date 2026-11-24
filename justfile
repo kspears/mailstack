@@ -9,7 +9,7 @@ setup:
     go mod download
 
 # Local development keeps its state in .dev/ unless MAILCTL_STATE says otherwise.
-dev_env := "MAILCTL_DEV=1 MAILCTL_ADMIN_HOST=localhost:8080 MAILCTL_LISTEN=127.0.0.1:8080 MAILCTL_WATCHER=off" + \
+dev_env := "MAILCTL_DEV=1 MAILCTL_ADMIN_HOST=localhost:8080 MAILCTL_LISTEN=127.0.0.1:8080 MAILCTL_WATCHER=off MAILCTL_DOVECOT_UID=" + `id -u` + \
     " MAILCTL_STATE=" + env("MAILCTL_STATE", justfile_directory() / ".dev/state") + \
     " MAILCTL_MAIL_ROOT=" + env("MAILCTL_MAIL_ROOT", justfile_directory() / ".dev/mail") + \
     " MAILCTL_INDEX_ROOT=" + env("MAILCTL_INDEX_ROOT", justfile_directory() / ".dev/index")

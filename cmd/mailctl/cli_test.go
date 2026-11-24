@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -13,7 +14,7 @@ const pw = "correct horse battery\n"
 func TestCLI(t *testing.T) {
 	state, mail := t.TempDir(), t.TempDir()
 	vars := map[string]string{
-		"MAILCTL_STATE": state, "MAILCTL_MAIL_ROOT": mail, "MAILCTL_WATCHER": "off",
+		"MAILCTL_STATE": state, "MAILCTL_MAIL_ROOT": mail, "MAILCTL_WATCHER": "off", "MAILCTL_DOVECOT_UID": strconv.Itoa(os.Getuid()),
 		"SUDO_USER": "alex", "USER": "root", "MAILCTL_ADMIN_HOST": "admin.example.test",
 	}
 	getenv := func(k string) string { return vars[k] }
@@ -120,7 +121,7 @@ func TestActorFallback(t *testing.T) {
 
 func TestLostStoreIsNotSilentlyReplaced(t *testing.T) {
 	state, mail := t.TempDir(), t.TempDir()
-	vars := map[string]string{"MAILCTL_STATE": state, "MAILCTL_MAIL_ROOT": mail, "MAILCTL_WATCHER": "off", "USER": "alex"}
+	vars := map[string]string{"MAILCTL_STATE": state, "MAILCTL_MAIL_ROOT": mail, "MAILCTL_WATCHER": "off", "MAILCTL_DOVECOT_UID": strconv.Itoa(os.Getuid()), "USER": "alex"}
 	do := func(args ...string) (int, string, string) {
 		var out, errOut bytes.Buffer
 		code := run(args, func(k string) string { return vars[k] }, strings.NewReader(""), &out, &errOut)
