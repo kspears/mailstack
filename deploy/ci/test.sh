@@ -126,6 +126,26 @@ docker compose exec -T dovecot sh -c '
 	if touch /data/mailstack/generations/probe 2>/dev/null; then echo "FAIL: dovecot can write generations"; exit 1; fi
 	echo "dovecot: generations read-only, nothing else"'
 
+step "only dovecot's group can read the password hashes; search and reindexing still work"
+# Every generation, including the bootstrap one: 0640, root, group 999 (dovecot in its image).
+docker compose exec -T postfix sh -c '
+	bad=$(find /data/mailstack/generations -path "*/dovecot/users" ! \( -perm 0640 -user 0 -group 999 \))
+	[ -z "$bad" ] || { echo "FAIL: users files with the wrong owner or mode: $bad"; exit 1; }
+	echo "dovecot/users: 0640 root:999 in every generation"'
+# The postfix processes that face the internet run as postfix, which is not in that group.
+if docker compose exec -T -u postfix postfix cat /data/mailstack/generations/current/dovecot/users >/dev/null 2>&1; then
+	echo "FAIL: the postfix user can read the password hashes"; exit 1
+fi
+echo "postfix user: cannot read dovecot/users"
+# Logins above already prove dovecot's auth process reads the file. Mail processes and doveadm
+# never read it themselves: they ask the auth process for the user.
+hits=$(docker compose exec -T dovecot doveadm search -u alice@example.test mailbox INBOX subject "$subject")
+[ -n "$hits" ] || { echo "FAIL: doveadm search found nothing for $subject"; exit 1; }
+docker compose exec -T dovecot doveadm force-resync -u alice@example.test '*'
+docker compose exec -T dovecot doveadm index -u alice@example.test INBOX
+probe fetch alice@example.test "$PASSWORD" "$subject" "hello from the integration test"
+echo "doveadm: search, resync and index work as the mail user"
+
 step "the watcher is restarted if it dies"
 # The bracket keeps this command line from matching its own pattern.
 docker compose exec -T postfix sh -c 'for p in /proc/[0-9]*; do case "$(tr "\0" " " <"$p/cmdline")" in *watcher.s[h]*) kill "${p#/proc/}";; esac; done'

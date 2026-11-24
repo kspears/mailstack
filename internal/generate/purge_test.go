@@ -214,12 +214,18 @@ func TestConfigNeedsAbsoluteRoots(t *testing.T) {
 	for _, env := range []map[string]string{
 		{"MAILCTL_MAIL_ROOT": "vmail"},
 		{"MAILCTL_INDEX_ROOT": "./index"},
+		{"MAILCTL_DOVECOT_GID": "0"},
+		{"MAILCTL_DOVECOT_GID": "dovecot"},
 	} {
 		if _, err := ConfigFromEnv(func(k string) string { return env[k] }); err == nil {
 			t.Errorf("ConfigFromEnv accepted %v", env)
 		}
 	}
-	if _, err := ConfigFromEnv(func(string) string { return "" }); err != nil {
+	cfg, err := ConfigFromEnv(func(string) string { return "" })
+	if err != nil {
 		t.Errorf("defaults rejected: %v", err)
+	}
+	if cfg.DovecotGID != defaultDovecotGID {
+		t.Errorf("DovecotGID = %d, want %d", cfg.DovecotGID, defaultDovecotGID)
 	}
 }

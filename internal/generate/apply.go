@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -17,12 +18,20 @@ import (
 
 const keepGenerations = 10
 
+// defaultDovecotGID is the dovecot group in the dovecot/dovecot image, whose auth process
+// reads dovecot/users.
+const defaultDovecotGID = 999
+
 // Config is the on-disk layout and apply behaviour. See the README for the env vars.
 type Config struct {
 	State      string
 	MailRoot   string
 	IndexRoot  string
 	WatcherOff bool
+	// DovecotGID owns dovecot/users, which is mode 0640: dovecot's auth process reads the
+	// hashes, and postfix, which also mounts the generations, cannot. 0 leaves the group as
+	// written.
+	DovecotGID int
 	Timeout    time.Duration
 	Poll       time.Duration
 	Now        func() time.Time
@@ -35,6 +44,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		MailRoot:   cmp.Or(getenv("MAILCTL_MAIL_ROOT"), "/var/vmail"),
 		IndexRoot:  cmp.Or(getenv("MAILCTL_INDEX_ROOT"), "/var/vmail_index"),
 		WatcherOff: getenv("MAILCTL_WATCHER") == "off",
+		DovecotGID: defaultDovecotGID,
 		Timeout:    30 * time.Second,
 		Poll:       100 * time.Millisecond,
 		Now:        time.Now,
@@ -45,6 +55,13 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 			return cfg, fmt.Errorf("MAILCTL_APPLY_TIMEOUT=%q is not a positive duration such as 30s", s)
 		}
 		cfg.Timeout = d
+	}
+	if s := getenv("MAILCTL_DOVECOT_GID"); s != "" {
+		gid, err := strconv.Atoi(s)
+		if err != nil || gid <= 0 {
+			return cfg, fmt.Errorf("MAILCTL_DOVECOT_GID=%q is not a positive group id such as 999", s)
+		}
+		cfg.DovecotGID = gid
 	}
 	if !filepath.IsAbs(cfg.MailRoot) || !filepath.IsAbs(cfg.IndexRoot) {
 		return cfg, fmt.Errorf("MAILCTL_MAIL_ROOT=%q and MAILCTL_INDEX_ROOT=%q must be absolute paths", cfg.MailRoot, cfg.IndexRoot)
@@ -386,7 +403,7 @@ func readWatcherStatus(path string) string {
 func (a *Admin) deploy(files Files) (string, error) {
 	id := files.ID(a.cfg.Now())
 	tmp := filepath.Join(a.gens, ".tmp-"+id)
-	if err := writeGeneration(tmp, files); err != nil {
+	if err := writeGeneration(tmp, files, a.cfg.DovecotGID); err != nil {
 		os.RemoveAll(tmp)
 		return "", err
 	}
@@ -452,7 +469,16 @@ func (a *Admin) prune() {
 	}
 	var ids []string
 	for _, e := range entries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+		if !e.IsDir() {
+			continue
+		}
+		// A .tmp- directory is a generation that failed part way; deploy holds the lock, so
+		// none is in progress here.
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			os.RemoveAll(filepath.Join(a.gens, e.Name()))
+			continue
+		}
+		if !strings.HasPrefix(e.Name(), ".") {
 			ids = append(ids, e.Name())
 		}
 	}
@@ -466,14 +492,22 @@ func (a *Admin) prune() {
 }
 
 // writeGeneration writes every file and makes the result durable: the files are
-// fsynced, then the directories that hold them.
-func writeGeneration(dir string, files Files) error {
+// fsynced, then the directories that hold them. dovecot/users holds every password hash,
+// so it is 0640 and owned by dovecotGID (see Config); everything else is 0644.
+func writeGeneration(dir string, files Files, dovecotGID int) error {
 	for _, name := range fileNames {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		if err := writeSynced(path, files[name]); err != nil {
+		mode, gid := os.FileMode(0o644), -1
+		if name == FileUsers {
+			mode = 0o640
+			if dovecotGID > 0 {
+				gid = dovecotGID
+			}
+		}
+		if err := writeSynced(path, files[name], mode, gid); err != nil {
 			return err
 		}
 	}
@@ -488,16 +522,24 @@ func writeGeneration(dir string, files Files) error {
 	return nil
 }
 
-func writeSynced(path, content string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+// writeSynced writes content with mode and, unless gid is -1, that group. The group and
+// mode are set before the content is written, so the file is never readable more widely.
+func writeSynced(path, content string, mode os.FileMode, gid int) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteString(content); err != nil {
+	if gid != -1 {
+		if err := f.Chown(-1, gid); err != nil {
+			f.Close()
+			return fmt.Errorf("set group %d on %s (the container needs CHOWN): %w", gid, path, err)
+		}
+	}
+	if err := f.Chmod(mode); err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Chmod(0o644); err != nil {
+	if _, err := f.WriteString(content); err != nil {
 		f.Close()
 		return err
 	}

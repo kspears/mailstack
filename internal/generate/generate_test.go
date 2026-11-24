@@ -87,7 +87,7 @@ func TestSelfCheck(t *testing.T) {
 			}
 			tc.mutate(f)
 			dir := t.TempDir()
-			if err := writeGeneration(dir, f); err != nil {
+			if err := writeGeneration(dir, f, 0); err != nil {
 				t.Fatal(err)
 			}
 			err := SelfCheck(dir, f)
@@ -104,7 +104,7 @@ func TestSelfCheck(t *testing.T) {
 func TestSelfCheckRoundTrip(t *testing.T) {
 	want := Render(fixture())
 	dir := t.TempDir()
-	if err := writeGeneration(dir, want); err != nil {
+	if err := writeGeneration(dir, want, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := SelfCheck(dir, want); err != nil {
@@ -403,6 +403,50 @@ func TestPrune(t *testing.T) {
 		t.Errorf("%d generations kept, want %d", dirs, keepGenerations)
 	}
 
+	failed := filepath.Join(a.gens, ".tmp-failed")
+	if err := os.MkdirAll(filepath.Join(failed, "dovecot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Apply("t", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(failed); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("failed generation left behind: %v", err)
+	}
+}
+
+func TestGeneratedFileModes(t *testing.T) {
+	// The last supplementary group is one the test may set but is not the primary one where
+	// the runner has several, so the group is proved to come from Config, not the creator.
+	groups, err := os.Getgroups()
+	if err != nil || len(groups) == 0 {
+		groups = []int{os.Getgid()}
+	}
+	gid := groups[len(groups)-1]
+	a := newAdmin(t, false)
+	a.cfg.DovecotGID = gid
+	if _, err := a.AddDomain("t", "example.test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct {
+		name string
+		mode os.FileMode
+		gid  int
+	}{
+		{FileUsers, 0o640, gid},
+		{FileDomains, 0o644, -1},
+	} {
+		st, err := os.Stat(filepath.Join(a.gens, "current", f.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != f.mode {
+			t.Errorf("%s mode = %v, want %v", f.name, st.Mode().Perm(), f.mode)
+		}
+		if got := int(st.Sys().(*syscall.Stat_t).Gid); f.gid != -1 && got != f.gid {
+			t.Errorf("%s group = %d, want %d", f.name, got, f.gid)
+		}
+	}
 }
 
 func tamperCurrent(t *testing.T, a *Admin) {
