@@ -210,7 +210,7 @@ func TestRemoveInRefusesSymlinkedParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := removeIn(parent, "old"); err == nil {
-		t.Fatal("removeIn deleted through a symlinked parent")
+		t.Fatal("removeIn returned nil for a symlinked parent")
 	}
 	if !exists(t, victim) {
 		t.Error("removeIn deleted through a symlinked parent")

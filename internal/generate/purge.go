@@ -95,9 +95,7 @@ func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
 	return done, errors.Join(errs...)
 }
 
-// removeAll deletes each path through its parent directory, so a parent that
-// dovecot swaps for a symlink after existingDir checked it cannot lead the
-// delete outside the mail and index roots.
+// removeAll deletes each path with removeIn.
 func removeAll(paths []string) error {
 	for _, p := range paths {
 		if err := removeIn(filepath.Dir(p), filepath.Base(p)); err != nil {
@@ -109,7 +107,9 @@ func removeAll(paths []string) error {
 
 // removeIn deletes name inside parent. It opens parent as an os.Root, which
 // never resolves a path outside it, and checks that what it opened is the
-// directory it found at parent rather than something a symlink led it to.
+// directory it found at parent rather than something a symlink led it to, so
+// a parent dovecot swaps for a symlink after existingDir checked it cannot
+// lead the delete outside the mail and index roots.
 func removeIn(parent, name string) error {
 	before, err := os.Lstat(parent)
 	if err != nil {
@@ -124,15 +124,16 @@ func removeIn(parent, name string) error {
 	if err != nil {
 		return err
 	}
-	if !before.IsDir() || !os.SameFile(before, opened) {
+	if !os.SameFile(before, opened) {
 		return fmt.Errorf("%s changed during the purge; check it and remove the mail by hand", parent)
 	}
 	return root.RemoveAll(name)
 }
 
 // existingDir reports whether dir exists. It and its parent must be real
-// directories, not symlinks, so a planted link cannot point the delete
-// elsewhere. A missing parent means dir is missing too.
+// directories, not symlinks, so a planted link is reported rather than purged;
+// removeIn is what keeps the delete itself inside the parent. A missing parent
+// means dir is missing too.
 func existingDir(dir string) (bool, error) {
 	ok, err := realDir(filepath.Dir(dir))
 	if ok {
