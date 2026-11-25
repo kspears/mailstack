@@ -197,6 +197,26 @@ func TestPurgeRemovedRefusesSymlinkedDomain(t *testing.T) {
 	}
 }
 
+// removeIn is the guard against a parent swapped for a symlink between the
+// check and the delete, which a test cannot time, so it is called directly.
+func TestRemoveInRefusesSymlinkedParent(t *testing.T) {
+	elsewhere := t.TempDir()
+	victim := filepath.Join(elsewhere, "old")
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(t.TempDir(), "example.test")
+	if err := os.Symlink(elsewhere, parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeIn(parent, "old"); err == nil {
+		t.Fatal("removeIn returned nil for a symlinked parent")
+	}
+	if !exists(t, victim) {
+		t.Error("removeIn deleted through a symlinked parent")
+	}
+}
+
 func TestPurgeRemovedRefusesMismatchedStore(t *testing.T) {
 	f := newPurgeFixture(t)
 	f.removed("old")

@@ -175,6 +175,19 @@ aliases and change where they deliver, and manage send-as grants. Both password 
 response; it is never stored in readable form or put in a cookie. Domains are added from the
 command line only.
 
+Resetting a password or disabling a mailbox stops new sign-ins only: IMAP sessions and
+authenticated SMTP submission connections already open stay signed in until they close. After a
+suspected compromise, end them too, from the compose project directory:
+
+```
+docker compose exec dovecot doveadm kick alex@example.test
+docker compose restart postfix
+```
+
+`doveadm kick` ends that mailbox's IMAP sessions only; postfix has no per-login equivalent, and
+`postfix reload` lets open connections finish, so the restart (a few seconds of refused
+connections, queued mail kept) is what ends a submission session sending as it.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAILCTL_LISTEN` | `:8080` | listen address |
