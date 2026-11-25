@@ -95,13 +95,39 @@ func (a *Admin) PurgeRemoved(actor string, dryRun bool) ([]string, error) {
 	return done, errors.Join(errs...)
 }
 
+// removeAll deletes each path through its parent directory, so a parent that
+// dovecot swaps for a symlink after existingDir checked it cannot lead the
+// delete outside the mail and index roots.
 func removeAll(paths []string) error {
 	for _, p := range paths {
-		if err := os.RemoveAll(p); err != nil {
+		if err := removeIn(filepath.Dir(p), filepath.Base(p)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// removeIn deletes name inside parent. It opens parent as an os.Root, which
+// never resolves a path outside it, and checks that what it opened is the
+// directory it found at parent rather than something a symlink led it to.
+func removeIn(parent, name string) error {
+	before, err := os.Lstat(parent)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	opened, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	if !before.IsDir() || !os.SameFile(before, opened) {
+		return fmt.Errorf("%s changed during the purge; check it and remove the mail by hand", parent)
+	}
+	return root.RemoveAll(name)
 }
 
 // existingDir reports whether dir exists. It and its parent must be real
