@@ -34,6 +34,10 @@ lint:
     @test -z "$(gofmt -l .)" || { gofmt -l .; echo "run: just fmt"; exit 1; }
     go vet ./...
 
+# Report known vulnerabilities in the Go code that is actually reached (scheduled in CI)
+vuln:
+    go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+
 # Format all Go code
 fmt:
     gofmt -w .
