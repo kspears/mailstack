@@ -36,7 +36,7 @@ lint:
 
 # Report known vulnerabilities in the Go code that is actually reached (scheduled in CI)
 vuln:
-    go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+    go tool govulncheck ./...
 
 # Format all Go code
 fmt:
